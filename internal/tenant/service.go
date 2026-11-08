@@ -11,10 +11,97 @@ import (
 	"strings"
 
 	"billing-backend/internal/domain"
+	"billing-backend/internal/store"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Service struct{ DB *pgxpool.Pool }
+
+func (s *Service) StateAndMarkup(ctx context.Context, tx store.Querier, id domain.TenantID) (domain.MarkupBPS, domain.TenantState, error) {
+	var markup domain.MarkupBPS
+	var state domain.TenantState
+	err := tx.QueryRow(ctx, `SELECT markup_bps,state FROM tenants WHERE id=$1`, string(id)).Scan(&markup, &state)
+	return markup, state, err
+}
+
+func (s *Service) CreateForOwner(ctx context.Context, tx store.Querier, owner domain.UserID, username, project string) (domain.TenantID, error) {
+	var id domain.TenantID
+	err := tx.QueryRow(ctx, `INSERT INTO tenants(owner_user_id,dstack_username,dstack_project) VALUES($1,$2,$3) ON CONFLICT(owner_user_id) DO NOTHING RETURNING id`, string(owner), username, project).Scan(&id)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", err
+		}
+		if err := tx.QueryRow(ctx, `SELECT id FROM tenants WHERE owner_user_id=$1`, string(owner)).Scan(&id); err != nil {
+			return "", err
+		}
+	}
+	_, err = tx.Exec(ctx, `UPDATE tenants SET state='provisioning' WHERE owner_user_id=$1`, string(owner))
+	return id, err
+}
+
+func (s *Service) FindByOwner(ctx context.Context, owner domain.UserID) (domain.TenantID, error) {
+	var id domain.TenantID
+	err := s.DB.QueryRow(ctx, `SELECT id FROM tenants WHERE owner_user_id=$1`, string(owner)).Scan(&id)
+	return id, err
+}
+
+func (s *Service) Exists(ctx context.Context, id domain.TenantID) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tenants WHERE id=$1)`, string(id)).Scan(&exists)
+	return exists, err
+}
+
+func (s *Service) ListAwaitingProvisioning(ctx context.Context, limit int) ([]domain.TenantID, error) {
+	rows, err := s.DB.Query(ctx, `SELECT id FROM tenants WHERE dstack_provision_state IN ('pending','failed') ORDER BY created_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []domain.TenantID
+	for rows.Next() {
+		var id domain.TenantID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *Service) ListReadyForUsage(ctx context.Context, limit int) ([]domain.TenantID, error) {
+	rows, err := s.DB.Query(ctx, `SELECT t.id FROM tenants t WHERE t.state='ready' AND t.dstack_provision_state='ready' ORDER BY COALESCE((SELECT min(c.updated_at) FROM dstack_poll_cursors c WHERE c.tenant_id=t.id),to_timestamp(0)),t.created_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []domain.TenantID
+	for rows.Next() {
+		var id domain.TenantID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *Service) HasCredential(ctx context.Context, id domain.TenantID) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tenant_dstack_credentials WHERE tenant_id=$1)`, string(id)).Scan(&exists)
+	return exists, err
+}
+
+func (s *Service) SetProjectID(ctx context.Context, id domain.TenantID, projectID string) error {
+	_, err := s.DB.Exec(ctx, `UPDATE tenants SET dstack_project_id=$2 WHERE id=$1 AND (dstack_project_id IS NULL OR dstack_project_id=$2)`, string(id), projectID)
+	return err
+}
+
+func (s *Service) MarkProvisionFailed(ctx context.Context, id domain.TenantID) error {
+	_, err := s.DB.Exec(ctx, `UPDATE tenants SET dstack_provision_state='failed',state='provisioning' WHERE id=$1`, string(id))
+	return err
+}
+
 type DStackAdmin struct {
 	BaseURL string
 	Token   string
@@ -91,6 +178,12 @@ func (s *Service) Get(ctx context.Context, id domain.TenantID) (domain.Tenant, e
 	var t domain.Tenant
 	err := s.DB.QueryRow(ctx, `SELECT id,owner_user_id,dstack_username,dstack_project,dstack_provision_state,markup_bps,state,COALESCE(dstack_project_id::text,'') FROM tenants WHERE id=$1`, string(id)).Scan(&t.ID, &t.Owner, &t.DStack.Username, &t.DStack.Project, &t.DStack.Provision, &t.Markup, &t.State, &t.DStack.ProjectID)
 	return t, err
+}
+
+func (s *Service) Markup(ctx context.Context, id domain.TenantID) (domain.MarkupBPS, error) {
+	var markup domain.MarkupBPS
+	err := s.DB.QueryRow(ctx, `SELECT markup_bps FROM tenants WHERE id=$1`, string(id)).Scan(&markup)
+	return markup, err
 }
 
 func (s *Service) SaveCustomerCredential(ctx context.Context, id domain.TenantID, secret string, key []byte, keyVersion string) error {

@@ -9,94 +9,59 @@ import (
 	"time"
 
 	"billing-backend/internal/domain"
+	"billing-backend/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type Service struct{ DB *pgxpool.Pool }
-type Posting struct {
-	Tenant         domain.TenantID
-	Delta          domain.CreditMicros
-	Kind           domain.EntryKind
-	IdempotencyKey string
-	Source         string
-	Snapshot       domain.EntrySnapshot
-}
-type Reservation struct {
-	Admission      domain.Admission
-	ResponseStatus int
-	ResponseBody   []byte
-	Replayed       bool
+type Service struct {
+	DB        *pgxpool.Pool
+	Prices    PriceReader
+	Admission AdmissionSource
 }
 
-func (s *Service) Balance(ctx context.Context, tenant domain.TenantID) (domain.CreditMicros, error) {
-	var balance domain.CreditMicros
-	err := s.DB.QueryRow(ctx, `SELECT balance_micros FROM credit_accounts WHERE tenant_id=$1`, string(tenant)).Scan(&balance)
-	return balance, err
+type PriceReader interface {
+	CurrentIn(context.Context, store.Querier, string) (domain.PriceSnapshot, error)
 }
 
-func (s *Service) Post(ctx context.Context, post Posting) (domain.CreditEntry, error) {
-	if post.Delta == 0 || post.IdempotencyKey == "" || post.Source == "" || post.Delta == domain.CreditMicros(math.MinInt64) {
-		return domain.CreditEntry{}, errors.New("posting requires nonzero delta, idempotency key, and source")
-	}
-	tx, err := s.DB.Begin(ctx)
-	if err != nil {
-		return domain.CreditEntry{}, err
-	}
-	defer tx.Rollback(ctx)
-	var balance domain.CreditMicros
-	if err = tx.QueryRow(ctx, `SELECT balance_micros FROM credit_accounts WHERE tenant_id=$1 FOR UPDATE`, string(post.Tenant)).Scan(&balance); err != nil {
-		return domain.CreditEntry{}, err
-	}
-	var prior domain.CreditEntry
-	var snapshot []byte
-	err = tx.QueryRow(ctx, `SELECT id,tenant_id,delta_micros,kind,idempotency_key,source,snapshot,created_at FROM credit_entries WHERE tenant_id=$1 AND idempotency_key=$2`, string(post.Tenant), post.IdempotencyKey).Scan(&prior.ID, &prior.Tenant, &prior.Delta, &prior.Kind, &prior.IdempotencyKey, &prior.Source, &snapshot, &prior.CreatedAt)
-	if err == nil {
-		if prior.Delta != post.Delta || prior.Kind != post.Kind || prior.Source != post.Source {
-			return domain.CreditEntry{}, domain.ErrIdempotencyConflict
-		}
-		_ = json.Unmarshal(snapshot, &prior.Snapshot)
-		if err = tx.Commit(ctx); err != nil {
-			return domain.CreditEntry{}, err
-		}
-		return prior, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return domain.CreditEntry{}, err
-	}
-	if len(post.IdempotencyKey) > 200 || len(post.Source) > 200 {
-		return domain.CreditEntry{}, errors.New("posting key and source must not exceed 200 characters")
-	}
-	encoded, _ := json.Marshal(post.Snapshot)
-	err = tx.QueryRow(ctx, `INSERT INTO credit_entries(tenant_id,delta_micros,kind,idempotency_key,source,snapshot) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,created_at`, string(post.Tenant), int64(post.Delta), string(post.Kind), post.IdempotencyKey, post.Source, encoded).Scan(&prior.ID, &prior.CreatedAt)
-	if err != nil {
-		return domain.CreditEntry{}, err
-	}
-	if _, err = tx.Exec(ctx, `UPDATE credit_accounts SET balance_micros=balance_micros+$2,version=version+1,updated_at=now() WHERE tenant_id=$1`, string(post.Tenant), int64(post.Delta)); err != nil {
-		return domain.CreditEntry{}, err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return domain.CreditEntry{}, err
-	}
-	return domain.CreditEntry{ID: prior.ID, Tenant: post.Tenant, Delta: post.Delta, Kind: post.Kind, IdempotencyKey: post.IdempotencyKey, Source: post.Source, Snapshot: post.Snapshot, CreatedAt: prior.CreatedAt}, nil
+type AdmissionSource interface {
+	StateAndMarkup(context.Context, store.Querier, domain.TenantID) (domain.MarkupBPS, domain.TenantState, error)
+}
+
+func (s *Service) OpenAccount(ctx context.Context, tx store.Querier, tenant domain.TenantID) error {
+	_, err := tx.Exec(ctx, `INSERT INTO credit_accounts(tenant_id) VALUES($1) ON CONFLICT(tenant_id) DO NOTHING`, string(tenant))
+	return err
+}
+
+type ReservationService interface {
+	Reserve(context.Context, domain.TenantID, string, string, []byte, time.Duration) (Reservation, error)
+	ReleaseReservation(context.Context, domain.TenantID, string) error
+	MarkReservationUncertain(context.Context, domain.TenantID, string) error
+	CompleteReservation(context.Context, domain.TenantID, string, int, []byte) error
 }
 
 func (s *Service) Admit(ctx context.Context, tenant domain.TenantID, priceKey string) (domain.Admission, error) {
+	if s.Admission == nil || s.Prices == nil {
+		return domain.Admission{}, errors.New("compute admission services are unavailable")
+	}
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return domain.Admission{}, err
 	}
 	defer tx.Rollback(ctx)
-	var balance domain.CreditMicros
-	var hourly domain.USDNano
-	var verified bool
-	var markup domain.MarkupBPS
-	var state domain.TenantState
-	err = tx.QueryRow(ctx, `SELECT a.balance_micros,COALESCE(p.hourly_usd_nano,0),COALESCE(p.verified,false),t.markup_bps,t.state FROM tenants t JOIN credit_accounts a ON a.tenant_id=t.id LEFT JOIN dstack_instance_prices p ON p.price_key=$2 WHERE t.id=$1 FOR UPDATE OF a`, string(tenant), priceKey).Scan(&balance, &hourly, &verified, &markup, &state)
+	markup, state, err := s.Admission.StateAndMarkup(ctx, tx, tenant)
 	if err != nil {
 		return domain.Admission{}, err
 	}
-	admission, err := domain.ComputeAdmission(balance, hourly, verified, markup, state)
+	var balance domain.CreditMicros
+	if err := tx.QueryRow(ctx, `SELECT balance_micros FROM credit_accounts WHERE tenant_id=$1 FOR UPDATE`, string(tenant)).Scan(&balance); err != nil {
+		return domain.Admission{}, err
+	}
+	price, err := s.Prices.CurrentIn(ctx, tx, priceKey)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return domain.Admission{}, err
+	}
+	admission, err := domain.ComputeAdmission(balance, price.HourlyUSD, price.Verified, markup, state)
 	if err != nil {
 		return domain.Admission{}, err
 	}
@@ -105,6 +70,9 @@ func (s *Service) Admit(ctx context.Context, tenant domain.TenantID, priceKey st
 }
 
 func (s *Service) Reserve(ctx context.Context, tenant domain.TenantID, priceKey, requestKey string, requestHash []byte, ttl time.Duration) (Reservation, error) {
+	if s.Admission == nil || s.Prices == nil {
+		return Reservation{}, errors.New("compute admission services are unavailable")
+	}
 	if requestKey == "" || len(requestKey) > 200 || len(requestHash) != 32 || ttl <= 0 || ttl > 24*time.Hour {
 		return Reservation{}, errors.New("compute reservation identity or expiry is invalid")
 	}
@@ -113,13 +81,16 @@ func (s *Service) Reserve(ctx context.Context, tenant domain.TenantID, priceKey,
 		return Reservation{}, err
 	}
 	defer tx.Rollback(ctx)
-	var balance domain.CreditMicros
-	var hourly domain.USDNano
-	var verified bool
-	var markup domain.MarkupBPS
-	var state domain.TenantState
-	err = tx.QueryRow(ctx, `SELECT a.balance_micros,COALESCE(p.hourly_usd_nano,0),COALESCE(p.verified,false),t.markup_bps,t.state FROM tenants t JOIN credit_accounts a ON a.tenant_id=t.id LEFT JOIN dstack_instance_prices p ON p.price_key=$2 WHERE t.id=$1 FOR UPDATE OF a`, string(tenant), priceKey).Scan(&balance, &hourly, &verified, &markup, &state)
+	markup, state, err := s.Admission.StateAndMarkup(ctx, tx, tenant)
 	if err != nil {
+		return Reservation{}, err
+	}
+	var balance domain.CreditMicros
+	if err := tx.QueryRow(ctx, `SELECT balance_micros FROM credit_accounts WHERE tenant_id=$1 FOR UPDATE`, string(tenant)).Scan(&balance); err != nil {
+		return Reservation{}, err
+	}
+	price, err := s.Prices.CurrentIn(ctx, tx, priceKey)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return Reservation{}, err
 	}
 	var existingHash []byte
@@ -154,24 +125,175 @@ func (s *Service) Reserve(ctx context.Context, tenant domain.TenantID, priceKey,
 	if existingState == "pending" || existingState == "reserved" {
 		available += existingReserve
 	}
-	admission, err := domain.ComputeAdmission(available, hourly, verified, markup, state)
+	admission, err := domain.ComputeAdmission(available, price.HourlyUSD, price.Verified, markup, state)
 	if err != nil {
 		return Reservation{}, err
 	}
+	admission.Tenant = tenant
 	if existingState == "pending" || existingState == "reserved" {
-		if _, err := tx.Exec(ctx, `UPDATE compute_reservations SET state='reserved',expires_at=now()+$3,updated_at=now(),response_status=NULL,response_body=NULL WHERE tenant_id=$1 AND request_key=$2`, string(tenant), requestKey, ttl); err != nil {
-			return Reservation{}, err
-		}
+		_, err = tx.Exec(ctx, `UPDATE compute_reservations SET state='reserved',reserved_micros=$3,expires_at=now()+$4::interval,updated_at=now(),response_status=NULL,response_body=NULL WHERE tenant_id=$1 AND request_key=$2`, string(tenant), requestKey, int64(admission.Reserved), ttl.String())
 	} else {
-		_, err = tx.Exec(ctx, `INSERT INTO compute_reservations(tenant_id,request_key,request_hash,reserved_micros,state,expires_at) VALUES($1,$2,$3,$4,'reserved',now()+$5) ON CONFLICT(tenant_id,request_key) DO UPDATE SET request_hash=EXCLUDED.request_hash,reserved_micros=EXCLUDED.reserved_micros,state='reserved',expires_at=EXCLUDED.expires_at,updated_at=now()`, string(tenant), requestKey, requestHash, int64(admission.Reserved), ttl)
-		if err != nil {
-			return Reservation{}, err
-		}
+		_, err = tx.Exec(ctx, `INSERT INTO compute_reservations(tenant_id,request_key,request_hash,reserved_micros,state,expires_at) VALUES($1,$2,$3,$4,'reserved',now()+$5::interval) ON CONFLICT(tenant_id,request_key) DO UPDATE SET request_hash=EXCLUDED.request_hash,reserved_micros=EXCLUDED.reserved_micros,state='reserved',expires_at=EXCLUDED.expires_at,updated_at=now()`, string(tenant), requestKey, requestHash, int64(admission.Reserved), ttl.String())
+	}
+	if err != nil {
+		return Reservation{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Reservation{}, err
 	}
 	return Reservation{Admission: admission}, nil
+}
+
+type Posting struct {
+	Tenant         domain.TenantID
+	Delta          domain.CreditMicros
+	Kind           domain.EntryKind
+	IdempotencyKey string
+	Source         string
+	Snapshot       domain.EntrySnapshot
+	SnapshotJSON   []byte
+}
+type EntryView struct {
+	ID             string          `json:"id"`
+	Delta          int64           `json:"delta_micros"`
+	Kind           string          `json:"kind"`
+	IdempotencyKey string          `json:"idempotency_key"`
+	Source         string          `json:"source"`
+	Snapshot       json.RawMessage `json:"snapshot"`
+	CreatedAt      time.Time       `json:"created_at"`
+}
+
+func (s *Service) ListEntries(ctx context.Context, tenant string, limit int) ([]EntryView, error) {
+	rows, err := s.DB.Query(ctx, `SELECT id,delta_micros,kind,idempotency_key,source,snapshot,created_at FROM credit_entries WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT $2`, tenant, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []EntryView
+	for rows.Next() {
+		var entry EntryView
+		if err := rows.Scan(&entry.ID, &entry.Delta, &entry.Kind, &entry.IdempotencyKey, &entry.Source, &entry.Snapshot, &entry.CreatedAt); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+type Reservation struct {
+	Admission      domain.Admission
+	ResponseStatus int
+	ResponseBody   []byte
+	Replayed       bool
+}
+
+func (s *Service) Balance(ctx context.Context, tenant domain.TenantID) (domain.CreditMicros, error) {
+	var balance domain.CreditMicros
+	err := s.DB.QueryRow(ctx, `SELECT balance_micros FROM credit_accounts WHERE tenant_id=$1`, string(tenant)).Scan(&balance)
+	return balance, err
+}
+
+func (s *Service) Post(ctx context.Context, post Posting) (domain.CreditEntry, error) {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return domain.CreditEntry{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	entry, err := s.PostInTx(ctx, tx, post)
+	if err != nil {
+		return domain.CreditEntry{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.CreditEntry{}, err
+	}
+	return entry, nil
+}
+
+func (s *Service) PostInTx(ctx context.Context, tx store.Querier, post Posting) (domain.CreditEntry, error) {
+	if tx == nil {
+		return domain.CreditEntry{}, errors.New("credit posting transaction is unavailable")
+	}
+	if post.Delta == 0 || post.IdempotencyKey == "" || post.Source == "" || post.Delta == domain.CreditMicros(math.MinInt64) {
+		return domain.CreditEntry{}, errors.New("posting requires nonzero delta, idempotency key, and source")
+	}
+	var balance domain.CreditMicros
+	if err := tx.QueryRow(ctx, `SELECT balance_micros FROM credit_accounts WHERE tenant_id=$1 FOR UPDATE`, string(post.Tenant)).Scan(&balance); err != nil {
+		return domain.CreditEntry{}, err
+	}
+	var prior domain.CreditEntry
+	var snapshot []byte
+	err := tx.QueryRow(ctx, `SELECT id,tenant_id,delta_micros,kind,idempotency_key,source,snapshot,created_at FROM credit_entries WHERE tenant_id=$1 AND idempotency_key=$2`, string(post.Tenant), post.IdempotencyKey).Scan(&prior.ID, &prior.Tenant, &prior.Delta, &prior.Kind, &prior.IdempotencyKey, &prior.Source, &snapshot, &prior.CreatedAt)
+	if err == nil {
+		if prior.Delta != post.Delta || prior.Kind != post.Kind || prior.Source != post.Source {
+			return domain.CreditEntry{}, domain.ErrIdempotencyConflict
+		}
+		_ = json.Unmarshal(snapshot, &prior.Snapshot)
+		return prior, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return domain.CreditEntry{}, err
+	}
+	if len(post.IdempotencyKey) > 200 || len(post.Source) > 200 {
+		return domain.CreditEntry{}, errors.New("posting key and source must not exceed 200 characters")
+	}
+	encoded := post.SnapshotJSON
+	if len(encoded) == 0 {
+		encoded, _ = json.Marshal(post.Snapshot)
+	}
+	if !json.Valid(encoded) {
+		return domain.CreditEntry{}, errors.New("posting snapshot must be valid JSON")
+	}
+	err = tx.QueryRow(ctx, `INSERT INTO credit_entries(tenant_id,delta_micros,kind,idempotency_key,source,snapshot) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,created_at`, string(post.Tenant), int64(post.Delta), string(post.Kind), post.IdempotencyKey, post.Source, encoded).Scan(&prior.ID, &prior.CreatedAt)
+	if err != nil {
+		return domain.CreditEntry{}, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE credit_accounts SET balance_micros=balance_micros+$2,version=version+1,updated_at=now() WHERE tenant_id=$1`, string(post.Tenant), int64(post.Delta)); err != nil {
+		return domain.CreditEntry{}, err
+	}
+	return domain.CreditEntry{ID: prior.ID, Tenant: post.Tenant, Delta: post.Delta, Kind: post.Kind, IdempotencyKey: post.IdempotencyKey, Source: post.Source, Snapshot: post.Snapshot, CreatedAt: prior.CreatedAt}, nil
+}
+
+func (s *Service) PostUsageInTx(ctx context.Context, tx store.Querier, tenant domain.TenantID, delta domain.CreditMicros, key, source string, snapshot []byte) error {
+	if delta >= 0 {
+		return errors.New("usage posting must be a debit")
+	}
+	entry, err := s.PostInTx(ctx, tx, Posting{Tenant: tenant, Delta: delta, Kind: domain.EntryUsage, IdempotencyKey: key, Source: source, SnapshotJSON: snapshot})
+	if err != nil {
+		return err
+	}
+	if entry.Delta != delta {
+		return domain.ErrIdempotencyConflict
+	}
+	return nil
+}
+
+func (s *Service) PostPurchaseInTx(ctx context.Context, tx store.Querier, tenant domain.TenantID, delta domain.CreditMicros, key, source string, snapshot []byte) error {
+	if delta <= 0 {
+		return errors.New("purchase posting must be a credit")
+	}
+	entry, err := s.PostInTx(ctx, tx, Posting{Tenant: tenant, Delta: delta, Kind: domain.EntryPurchase, IdempotencyKey: key, Source: source, SnapshotJSON: snapshot})
+	if err != nil {
+		return err
+	}
+	if entry.Delta != delta {
+		return domain.ErrIdempotencyConflict
+	}
+	return nil
+}
+
+func (s *Service) PostReversalInTx(ctx context.Context, tx store.Querier, tenant domain.TenantID, delta domain.CreditMicros, key, source string, snapshot []byte) error {
+	if delta >= 0 {
+		return errors.New("reversal posting must be a debit")
+	}
+	entry, err := s.PostInTx(ctx, tx, Posting{Tenant: tenant, Delta: delta, Kind: domain.EntryReversal, IdempotencyKey: key, Source: source, SnapshotJSON: snapshot})
+	if err != nil {
+		return err
+	}
+	if entry.Delta != delta {
+		return domain.ErrIdempotencyConflict
+	}
+	return nil
 }
 
 func (s *Service) ReleaseReservation(ctx context.Context, tenant domain.TenantID, requestKey string) error {

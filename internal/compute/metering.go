@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"time"
 
 	"billing-backend/internal/domain"
-	"billing-backend/internal/ledger"
+	"billing-backend/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -33,6 +34,20 @@ type UsageEvidence struct {
 	PriceVerified bool
 	SourceVersion string
 	Provenance    map[string]any
+}
+
+type UsageRecord struct {
+	Allocation string    `json:"allocation_id"`
+	Submission string    `json:"submission_id"`
+	Start      time.Time `json:"start"`
+	End        time.Time `json:"end"`
+	GPUs       int       `json:"gpu_count"`
+	Rate       *int64    `json:"rate_usd_nano"`
+	RateUnit   string    `json:"rate_unit"`
+	USD        *int64    `json:"usd_nano"`
+	Markup     int       `json:"markup_bps"`
+	Credits    int64     `json:"credit_delta_micros"`
+	Version    string    `json:"source_version"`
 }
 
 type InstanceUsageSnapshot struct {
@@ -122,10 +137,32 @@ func BuildInstanceUsageEvidence(tenant domain.TenantID, snapshot InstanceUsageSn
 
 type Meter struct {
 	DB     *pgxpool.Pool
-	Ledger *ledger.Service
+	Ledger interface {
+		PostUsageInTx(context.Context, store.Querier, domain.TenantID, domain.CreditMicros, string, string, []byte) error
+	}
+}
+
+func (m *Meter) ListUsage(ctx context.Context, tenant domain.TenantID, limit int) ([]UsageRecord, error) {
+	rows, err := m.DB.Query(ctx, `SELECT allocation_id,submission_id,interval_start,interval_end,gpu_count,rate_usd_nano,rate_unit,usd_nano,markup_bps,credit_delta_micros,source_version FROM usage_records WHERE tenant_id=$1 ORDER BY interval_start DESC LIMIT $2`, string(tenant), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []UsageRecord
+	for rows.Next() {
+		var record UsageRecord
+		if err := rows.Scan(&record.Allocation, &record.Submission, &record.Start, &record.End, &record.GPUs, &record.Rate, &record.RateUnit, &record.USD, &record.Markup, &record.Credits, &record.Version); err != nil {
+			return nil, fmt.Errorf("read tenant usage: %w", err)
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
 }
 
 func (m *Meter) PostUsage(ctx context.Context, e UsageEvidence) error {
+	if m.Ledger == nil {
+		return errors.New("credit ledger is unavailable")
+	}
 	if e.Tenant == "" || e.AllocationID == "" || e.SourceVersion == "" || !e.IntervalEnd.After(e.IntervalStart) {
 		return errors.New("usage evidence is incomplete")
 	}
@@ -134,9 +171,8 @@ func (m *Meter) PostUsage(ctx context.Context, e UsageEvidence) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var balance domain.CreditMicros
 	var markup domain.MarkupBPS
-	if err = tx.QueryRow(ctx, `SELECT a.balance_micros,t.markup_bps FROM tenants t JOIN credit_accounts a ON a.tenant_id=t.id WHERE t.id=$1 FOR UPDATE OF a`, string(e.Tenant)).Scan(&balance, &markup); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT t.markup_bps FROM tenants t WHERE t.id=$1`, string(e.Tenant)).Scan(&markup); err != nil {
 		return err
 	}
 	unit := string(e.RateUnit)
@@ -193,20 +229,12 @@ func (m *Meter) PostUsage(ctx context.Context, e UsageEvidence) error {
 	}
 	if credits > 0 {
 		key := "usage:" + string(e.Tenant) + ":" + e.AllocationID + ":" + e.IntervalStart.UTC().Format(time.RFC3339Nano) + ":" + e.IntervalEnd.UTC().Format(time.RFC3339Nano)
-		if _, err = tx.Exec(ctx, `INSERT INTO credit_entries(tenant_id,delta_micros,kind,idempotency_key,source,snapshot) VALUES($1,$2,'usage',$3,$4,jsonb_build_object('usd_nano',$5,'markup_bps',$6,'allocation_id',$7))`, string(e.Tenant), -int64(credits), key, e.AllocationID, int64(cost), int64(markup)); err != nil {
+		snapshot, err := json.Marshal(map[string]any{"usd_nano": int64(cost), "markup_bps": int64(markup), "allocation_id": e.AllocationID})
+		if err != nil {
 			return err
 		}
-		var reserved domain.CreditMicros
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(reserved_micros),0) FROM compute_reservations WHERE tenant_id=$1 AND state='reserved' AND expires_at>now()`, string(e.Tenant)).Scan(&reserved); err != nil {
-			return err
-		}
-		if balance+reserved-credits < 0 {
-			if _, err := tx.Exec(ctx, `UPDATE credit_accounts SET balance_micros=balance_micros-$2,version=version+1,updated_at=now() WHERE tenant_id=$1`, string(e.Tenant), int64(credits)); err != nil {
-				return err
-			}
-			return tx.Commit(ctx)
-		}
-		if _, err = tx.Exec(ctx, `UPDATE credit_accounts SET balance_micros=balance_micros-$2,version=version+1,updated_at=now() WHERE tenant_id=$1`, string(e.Tenant), int64(credits)); err != nil {
+		err = m.Ledger.PostUsageInTx(ctx, tx, e.Tenant, -credits, key, e.AllocationID, snapshot)
+		if err != nil {
 			return err
 		}
 	}

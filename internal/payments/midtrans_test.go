@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"testing"
+
+	"billing-backend/internal/domain"
 )
 
 func TestMidtransSignatureUsesExactGrossAmountString(t *testing.T) {
@@ -76,13 +78,13 @@ func TestAmbiguousNotificationStatusesRequireStatusLookup(t *testing.T) {
 func TestPurchaseTransitionsAreMonotonicAndRefundCompensatesSettlement(t *testing.T) {
 	allowed := [][2]string{{"pending", "settlement"}, {"pending", "cancel"}, {"settlement", "refund"}, {"cancel", "refund"}}
 	for _, transition := range allowed {
-		if !canAdvancePurchase(transition[0], transition[1]) {
+		if !domain.PurchaseState(transition[0]).CanTransitionTo(domain.PurchaseState(transition[1])) {
 			t.Errorf("transition %s -> %s was rejected", transition[0], transition[1])
 		}
 	}
 	denied := [][2]string{{"settlement", "pending"}, {"settlement", "deny"}, {"refund", "settlement"}, {"cancel", "settlement"}, {"expire", "pending"}}
 	for _, transition := range denied {
-		if canAdvancePurchase(transition[0], transition[1]) {
+		if domain.PurchaseState(transition[0]).CanTransitionTo(domain.PurchaseState(transition[1])) {
 			t.Errorf("transition %s -> %s was allowed", transition[0], transition[1])
 		}
 	}

@@ -2,11 +2,8 @@ package httpapi
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -16,23 +13,25 @@ import (
 	"time"
 
 	"billing-backend/internal/apikey"
+	"billing-backend/internal/compute"
 	"billing-backend/internal/domain"
 	"billing-backend/internal/dstack"
 	"billing-backend/internal/identity"
 	"billing-backend/internal/ledger"
 	"billing-backend/internal/payments"
+	"billing-backend/internal/pricing"
 	"billing-backend/internal/tenant"
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Server struct {
-	DB               *pgxpool.Pool
 	Identity         *identity.Service
 	Keys             *apikey.Service
 	Ledger           *ledger.Service
+	Meter            *compute.Meter
 	Tenants          *tenant.Service
 	Payments         *payments.Service
+	Pricing          *pricing.Service
 	DStack           *dstack.Proxy
 	PaymentServerKey string
 	Limiter          *requestLimiter
@@ -189,14 +188,11 @@ func (s *Server) login(c *gin.Context) {
 
 func (s *Server) logout(c *gin.Context) {
 	auth := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
-	h := sha256.Sum256([]byte(auth))
-	mac := hmac.New(sha256.New, s.Identity.SessionSecret)
-	_, _ = mac.Write(h[:])
 	if auth == "" {
 		c.Status(http.StatusNoContent)
 		return
 	}
-	if _, err := s.DB.Exec(c, `UPDATE portal_sessions SET revoked_at=now() WHERE token_hash=$1 AND revoked_at IS NULL`, mac.Sum(nil)); err != nil {
+	if err := s.Identity.RevokeSession(c, auth); err != nil {
 		respondError(c, 500, errors.New("could not revoke session"))
 		return
 	}
@@ -227,9 +223,8 @@ func (s *Server) authenticate(apiOnly bool) gin.HandlerFunc {
 				c.Abort()
 				return
 			}
-			var tenantID domain.TenantID
 			provider, _ := s.Identity.IsProvider(c, userID)
-			err = s.DB.QueryRow(c, `SELECT id FROM tenants WHERE owner_user_id=$1`, userID).Scan(&tenantID)
+			tenantID, err := s.Tenants.FindByOwner(c, domain.UserID(userID))
 			if err != nil {
 				if provider {
 					p = principal{UserID: userID, Provider: true, Kind: "portal"}
@@ -268,8 +263,7 @@ func (s *Server) me(c *gin.Context) {
 		respondError(c, http.StatusForbidden, errors.New("provider account has no customer tenant"))
 		return
 	}
-	var email string
-	_ = s.DB.QueryRow(c, `SELECT email FROM users WHERE id=$1`, p.UserID).Scan(&email)
+	email, _ := s.Identity.Email(c, p.UserID)
 	t, err := s.Tenants.Get(c, p.TenantID)
 	if err != nil {
 		respondError(c, 500, err)
@@ -296,33 +290,10 @@ func (s *Server) usage(c *gin.Context) {
 		respondError(c, http.StatusForbidden, errors.New("provider account has no customer tenant"))
 		return
 	}
-	rows, err := s.DB.Query(c, `SELECT allocation_id,submission_id,interval_start,interval_end,gpu_count,rate_usd_nano,rate_unit,usd_nano,markup_bps,credit_delta_micros,source_version FROM usage_records WHERE tenant_id=$1 ORDER BY interval_start DESC LIMIT 500`, string(p.TenantID))
+	records, err := s.Meter.ListUsage(c, p.TenantID, 500)
 	if err != nil {
 		respondError(c, 500, err)
 		return
-	}
-	defer rows.Close()
-	type item struct {
-		Allocation string    `json:"allocation_id"`
-		Submission string    `json:"submission_id"`
-		Start      time.Time `json:"start"`
-		End        time.Time `json:"end"`
-		GPUs       int       `json:"gpu_count"`
-		Rate       *int64    `json:"rate_usd_nano"`
-		RateUnit   string    `json:"rate_unit"`
-		USD        *int64    `json:"usd_nano"`
-		Markup     int       `json:"markup_bps"`
-		Credits    int64     `json:"credit_delta_micros"`
-		Version    string    `json:"source_version"`
-	}
-	var records []item
-	for rows.Next() {
-		var v item
-		if err := rows.Scan(&v.Allocation, &v.Submission, &v.Start, &v.End, &v.GPUs, &v.Rate, &v.RateUnit, &v.USD, &v.Markup, &v.Credits, &v.Version); err != nil {
-			respondError(c, 500, fmt.Errorf("read tenant usage: %w", err))
-			return
-		}
-		records = append(records, v)
 	}
 	c.JSON(200, records)
 }
@@ -419,30 +390,10 @@ func (s *Server) purchaseList(c *gin.Context) {
 		respondError(c, http.StatusForbidden, errors.New("provider account has no customer tenant"))
 		return
 	}
-	rows, err := s.DB.Query(c, `SELECT id,order_id,package_size,credit_micros,amount_idr,state,snap_redirect_url,created_at FROM purchases WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 200`, string(p.TenantID))
+	list, err := s.Payments.ListPurchases(c, p.TenantID, 200)
 	if err != nil {
 		respondError(c, 500, err)
 		return
-	}
-	defer rows.Close()
-	type purchase struct {
-		ID       string    `json:"id"`
-		Order    string    `json:"order_id"`
-		Package  int       `json:"package_credits"`
-		Credits  int64     `json:"credit_micros"`
-		Amount   int64     `json:"amount_idr"`
-		State    string    `json:"state"`
-		Redirect string    `json:"redirect_url"`
-		Created  time.Time `json:"created_at"`
-	}
-	var list []purchase
-	for rows.Next() {
-		var v purchase
-		if err := rows.Scan(&v.ID, &v.Order, &v.Package, &v.Credits, &v.Amount, &v.State, &v.Redirect, &v.Created); err != nil {
-			respondError(c, 500, err)
-			return
-		}
-		list = append(list, v)
 	}
 	c.JSON(200, list)
 }
@@ -519,8 +470,8 @@ func (s *Server) setMarkup(c *gin.Context) {
 		respondError(c, 400, errors.New("invalid request body"))
 		return
 	}
-	var exists bool
-	if err := s.DB.QueryRow(c, `SELECT EXISTS(SELECT 1 FROM tenants WHERE id=$1)`, c.Param("id")).Scan(&exists); err != nil || !exists {
+	exists, err := s.Tenants.Exists(c, domain.TenantID(c.Param("id")))
+	if err != nil || !exists {
 		respondError(c, 404, errors.New("tenant not found"))
 		return
 	}
@@ -536,42 +487,20 @@ func (s *Server) providerLedger(c *gin.Context) {
 		respondError(c, 400, errors.New("tenant_id is required"))
 		return
 	}
-	rows, err := s.DB.Query(c, `SELECT id,delta_micros,kind,idempotency_key,source,snapshot,created_at FROM credit_entries WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 500`, tenantID)
+	entries, err := s.Ledger.ListEntries(c, tenantID, 500)
 	if err != nil {
 		respondError(c, 500, err)
 		return
 	}
-	defer rows.Close()
-	type entry struct {
-		ID          string          `json:"id"`
-		Delta       int64           `json:"delta_micros"`
-		Kind        string          `json:"kind"`
-		Idempotency string          `json:"idempotency_key"`
-		Source      string          `json:"source"`
-		Snapshot    json.RawMessage `json:"snapshot"`
-		Created     time.Time       `json:"created_at"`
-	}
-	var entries []entry
-	for rows.Next() {
-		var v entry
-		if err := rows.Scan(&v.ID, &v.Delta, &v.Kind, &v.Idempotency, &v.Source, &v.Snapshot, &v.Created); err != nil {
-			respondError(c, 500, err)
-			return
-		}
-		entries = append(entries, v)
-	}
 	c.JSON(200, entries)
 }
 func (s *Server) getPrice(c *gin.Context) {
-	var price int64
-	var verified bool
-	var version string
-	err := s.DB.QueryRow(c, `SELECT hourly_usd_nano,verified,version FROM dstack_instance_prices WHERE price_key='default'`).Scan(&price, &verified, &version)
+	price, err := s.Pricing.Current(c, "default")
 	if err != nil {
 		respondError(c, 404, err)
 		return
 	}
-	c.JSON(200, gin.H{"hourly_usd_nano": price, "verified": verified, "version": version})
+	c.JSON(200, gin.H{"hourly_usd_nano": price.HourlyUSD, "verified": price.Verified, "version": price.Version})
 }
 func (s *Server) setPrice(c *gin.Context) {
 	var req struct {
@@ -588,11 +517,7 @@ func (s *Server) setPrice(c *gin.Context) {
 		return
 	}
 	p := mustPrincipal(c)
-	verifiedBy := any(nil)
-	if req.Verified {
-		verifiedBy = p.UserID
-	}
-	_, err := s.DB.Exec(c, `INSERT INTO dstack_instance_prices(price_key,hourly_usd_nano,rate_unit,verified,version,verified_by) VALUES('default',$1,'instance_hour',$2,$3,$4) ON CONFLICT(price_key) DO UPDATE SET hourly_usd_nano=EXCLUDED.hourly_usd_nano,verified=EXCLUDED.verified,version=EXCLUDED.version,verified_by=EXCLUDED.verified_by,observed_at=now()`, req.HourlyUSDNano, req.Verified, req.Version, verifiedBy)
+	err := s.Pricing.Set(c, "default", domain.USDNano(req.HourlyUSDNano), req.Verified, req.Version, p.UserID)
 	if err != nil {
 		respondError(c, 500, err)
 		return

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"billing-backend/internal/domain"
+	"billing-backend/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/argon2"
 )
@@ -78,8 +80,18 @@ func (m SMTPMailer) SendVerification(ctx context.Context, email, token string) e
 type Service struct {
 	DB            *pgxpool.Pool
 	Mailer        Mailer
+	Tenants       TenantRegistrar
+	Accounts      CreditAccountOpener
 	SessionTTL    time.Duration
 	SessionSecret []byte
+}
+
+type TenantRegistrar interface {
+	CreateForOwner(context.Context, store.Querier, domain.UserID, string, string) (domain.TenantID, error)
+}
+
+type CreditAccountOpener interface {
+	OpenAccount(context.Context, store.Querier, domain.TenantID) error
 }
 type Session struct {
 	Token     string
@@ -196,23 +208,19 @@ func (s *Service) VerifyEmail(ctx context.Context, token string) (string, error)
 	if _, err = tx.Exec(ctx, `UPDATE users SET email_verified_at=COALESCE(email_verified_at,now()) WHERE id=$1`, userID); err != nil {
 		return "", err
 	}
-	var username, project string
 	var nonce [8]byte
 	if _, err = rand.Read(nonce[:]); err != nil {
 		return "", err
 	}
 	suffix := base64.RawURLEncoding.EncodeToString(nonce[:])
-	username = "tenant-" + suffix
-	project = "project-" + suffix
-	_, err = tx.Exec(ctx, `INSERT INTO tenants(owner_user_id,dstack_username,dstack_project) VALUES($1,$2,$3) ON CONFLICT(owner_user_id) DO NOTHING`, userID, username, project)
+	tenantID, err := s.Tenants.CreateForOwner(ctx, tx, domain.UserID(userID), "tenant-"+suffix, "project-"+suffix)
 	if err != nil {
 		return "", err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE tenants SET state='provisioning' WHERE owner_user_id=$1`, userID); err != nil {
-		return "", err
+	if tenantID == "" {
+		return "", errors.New("tenant activation did not return a tenant")
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO credit_accounts(tenant_id) SELECT id FROM tenants WHERE owner_user_id=$1 ON CONFLICT(tenant_id) DO NOTHING`, userID)
-	if err != nil {
+	if err = s.Accounts.OpenAccount(ctx, tx, tenantID); err != nil {
 		return "", err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -258,6 +266,20 @@ func (s *Service) Authenticate(ctx context.Context, token string) (string, error
 	var userID string
 	err := s.DB.QueryRow(ctx, `SELECT user_id FROM portal_sessions WHERE token_hash=$1 AND revoked_at IS NULL AND expires_at>now()`, storedHash).Scan(&userID)
 	return userID, err
+}
+
+func (s *Service) RevokeSession(ctx context.Context, token string) error {
+	h := sha256.Sum256([]byte(token))
+	mac := hmac.New(sha256.New, s.SessionSecret)
+	_, _ = mac.Write(h[:])
+	_, err := s.DB.Exec(ctx, `UPDATE portal_sessions SET revoked_at=now() WHERE token_hash=$1 AND revoked_at IS NULL`, mac.Sum(nil))
+	return err
+}
+
+func (s *Service) Email(ctx context.Context, userID string) (string, error) {
+	var email string
+	err := s.DB.QueryRow(ctx, `SELECT email FROM users WHERE id=$1`, userID).Scan(&email)
+	return email, err
 }
 
 func (s *Service) IsProvider(ctx context.Context, userID string) (bool, error) {

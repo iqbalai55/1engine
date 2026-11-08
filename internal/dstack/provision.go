@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"billing-backend/internal/domain"
+	"billing-backend/internal/identity"
 	"billing-backend/internal/tenant"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type AdminClient struct {
@@ -21,7 +21,7 @@ type AdminClient struct {
 	HTTP           *http.Client
 }
 type Provisioner struct {
-	DB            *pgxpool.Pool
+	Identity      *identity.Service
 	Admin         AdminClient
 	Tenant        *tenant.Service
 	EncryptionKey []byte
@@ -126,8 +126,8 @@ func (p *Provisioner) Provision(ctx context.Context, id domain.TenantID) error {
 	if err != nil {
 		return err
 	}
-	var hasCredential bool
-	if err := p.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tenant_dstack_credentials WHERE tenant_id=$1)`, string(id)).Scan(&hasCredential); err != nil {
+	hasCredential, err := p.Tenant.HasCredential(ctx, id)
+	if err != nil {
 		return err
 	}
 	if t.DStack.Provision == domain.ProvisionReady && hasCredential {
@@ -139,8 +139,8 @@ func (p *Provisioner) Provision(ctx context.Context, id domain.TenantID) error {
 	if err := validateProvisionIdentity(t.DStack); err != nil {
 		return p.failed(ctx, id, err)
 	}
-	var email string
-	if err = p.DB.QueryRow(ctx, `SELECT email FROM users WHERE id=$1`, string(t.Owner)).Scan(&email); err != nil {
+	email, err := p.Identity.Email(ctx, string(t.Owner))
+	if err != nil {
 		return err
 	}
 	if err = p.Admin.post(ctx, "/api/users/create", userCreateRequest{Username: t.DStack.Username, GlobalRole: "user", Email: email, Active: true}, nil); err != nil && !errors.Is(err, errResourceExists) {
@@ -164,7 +164,7 @@ func (p *Provisioner) Provision(ctx context.Context, id domain.TenantID) error {
 		}
 	}
 	if createdProject.ProjectID != "" {
-		if _, err = p.DB.Exec(ctx, `UPDATE tenants SET dstack_project_id=$2 WHERE id=$1 AND (dstack_project_id IS NULL OR dstack_project_id=$2)`, string(id), createdProject.ProjectID); err != nil {
+		if err = p.Tenant.SetProjectID(ctx, id, createdProject.ProjectID); err != nil {
 			return p.failed(ctx, id, err)
 		}
 	}
@@ -214,6 +214,24 @@ func hasAdminMember(project projectResponse, username string) bool {
 }
 
 func (p *Provisioner) failed(ctx context.Context, id domain.TenantID, cause error) error {
-	_, _ = p.DB.Exec(ctx, `UPDATE tenants SET dstack_provision_state='failed',state='provisioning' WHERE id=$1`, string(id))
+	_ = p.Tenant.MarkProvisionFailed(ctx, id)
 	return cause
+}
+
+func (p *Provisioner) ProvisionPending(ctx context.Context, limit int) error {
+	ids, err := p.Tenant.ListAwaitingProvisioning(ctx, limit)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, id := range ids {
+		if err := p.Provision(ctx, id); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (p *Provisioner) PendingTenants(ctx context.Context, limit int) ([]domain.TenantID, error) {
+	return p.Tenant.ListAwaitingProvisioning(ctx, limit)
 }

@@ -19,8 +19,7 @@ import (
 	"time"
 
 	"billing-backend/internal/domain"
-	"billing-backend/internal/ledger"
-	"github.com/jackc/pgx/v5"
+	"billing-backend/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -73,13 +72,44 @@ type PurchaseView struct {
 	RedirectURL string               `json:"redirect_url"`
 	State       domain.PurchaseState `json:"state"`
 }
+
+type PurchaseSummary struct {
+	ID       string    `json:"id"`
+	Order    string    `json:"order_id"`
+	Package  int       `json:"package_credits"`
+	Credits  int64     `json:"credit_micros"`
+	Amount   int64     `json:"amount_idr"`
+	State    string    `json:"state"`
+	Redirect string    `json:"redirect_url"`
+	Created  time.Time `json:"created_at"`
+}
 type Service struct {
 	DB     *pgxpool.Pool
-	Ledger *ledger.Service
-	Snap   SnapClient
+	Ledger interface {
+		PostPurchaseInTx(context.Context, store.Querier, domain.TenantID, domain.CreditMicros, string, string, []byte) error
+		PostReversalInTx(context.Context, store.Querier, domain.TenantID, domain.CreditMicros, string, string, []byte) error
+	}
+	Snap SnapClient
 }
 
 var ErrStatusNotFound = errors.New("Midtrans purchase status not found")
+
+func (s *Service) ListPurchases(ctx context.Context, tenant domain.TenantID, limit int) ([]PurchaseSummary, error) {
+	rows, err := s.DB.Query(ctx, `SELECT id,order_id,package_size,credit_micros,amount_idr,state,snap_redirect_url,created_at FROM purchases WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT $2`, string(tenant), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var purchases []PurchaseSummary
+	for rows.Next() {
+		var purchase PurchaseSummary
+		if err := rows.Scan(&purchase.ID, &purchase.Order, &purchase.Package, &purchase.Credits, &purchase.Amount, &purchase.State, &purchase.Redirect, &purchase.Created); err != nil {
+			return nil, err
+		}
+		purchases = append(purchases, purchase)
+	}
+	return purchases, rows.Err()
+}
 
 func (c SnapClient) Create(ctx context.Context, orderID, email string, amount domain.IDR) (snapResponse, error) {
 	if c.Config.ServerKey == "" || c.Config.ClientKey == "" || c.Config.BaseURL == "" {
@@ -400,6 +430,9 @@ func (c SnapClient) notificationStatus(ctx context.Context, order string) (Notif
 }
 
 func (s *Service) ApplyStatus(ctx context.Context, orderID, status, transactionID string) error {
+	if s.Ledger == nil {
+		return errors.New("credit ledger is unavailable")
+	}
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return err
@@ -414,23 +447,22 @@ func (s *Service) ApplyStatus(ctx context.Context, orderID, status, transactionI
 	if status != "settlement" && status != "deny" && status != "cancel" && status != "expire" {
 		return tx.Commit(ctx)
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO payment_observations(purchase_id,source,event_key,status,gross_amount,payload) VALUES($1,'status',$2,$3,$4,jsonb_build_object('order_id',$5)) ON CONFLICT(purchase_id,source,event_key) DO NOTHING`, purchaseID, orderID+":"+transactionID+":"+status, status, strconv.FormatInt(amount, 10), orderID)
+	_, err = tx.Exec(ctx, `INSERT INTO payment_observations(purchase_id,source,event_key,status,gross_amount,payload) VALUES($1,'status',$2,$3,$4,jsonb_build_object('order_id',$5::text)) ON CONFLICT(purchase_id,source,event_key) DO NOTHING`, purchaseID, orderID+":"+transactionID+":"+status, status, strconv.FormatInt(amount, 10), orderID)
 	if err != nil {
 		return err
 	}
 	if status == "settlement" && currentState != "settlement" && currentState != "refund" && currentState != "deny" && currentState != "cancel" && currentState != "expire" {
-		var inserted bool
-		if err = tx.QueryRow(ctx, `INSERT INTO credit_entries(tenant_id,delta_micros,kind,idempotency_key,source,snapshot) VALUES($1,$2,'purchase',$3,$4,jsonb_build_object('purchase_id',$5,'amount_idr',$6)) ON CONFLICT(tenant_id,idempotency_key) DO NOTHING RETURNING true`, tenant, credits, "purchase:"+purchaseID+":settlement", purchaseID, purchaseID, amount).Scan(&inserted); err != nil && err != pgx.ErrNoRows {
-			return err
+		snapshot, marshalErr := json.Marshal(map[string]any{"purchase_id": purchaseID, "amount_idr": amount})
+		if marshalErr != nil {
+			return marshalErr
 		}
-		if inserted {
-			if _, err = tx.Exec(ctx, `UPDATE credit_accounts SET balance_micros=balance_micros+$2,version=version+1,updated_at=now() WHERE tenant_id=$1`, tenant, credits); err != nil {
-				return err
-			}
+		postErr := s.Ledger.PostPurchaseInTx(ctx, tx, domain.TenantID(tenant), domain.CreditMicros(credits), "purchase:"+purchaseID+":settlement", purchaseID, snapshot)
+		if postErr != nil {
+			return postErr
 		}
 	}
 	nextState := normalizeStatus(status)
-	if canAdvancePurchase(currentState, nextState) {
+	if domain.PurchaseState(currentState).CanTransitionTo(domain.PurchaseState(nextState)) {
 		if _, err = tx.Exec(ctx, `UPDATE purchases SET state=$2,updated_at=now() WHERE id=$1`, purchaseID, nextState); err != nil {
 			return err
 		}
@@ -439,6 +471,9 @@ func (s *Service) ApplyStatus(ctx context.Context, orderID, status, transactionI
 }
 
 func (s *Service) ApplyRefund(ctx context.Context, orderID, refundedAmount, transactionID string) error {
+	if s.Ledger == nil {
+		return errors.New("credit ledger is unavailable")
+	}
 	if refundedAmount == "" {
 		return errors.New("refund notification is missing cumulative refund amount")
 	}
@@ -465,12 +500,12 @@ func (s *Service) ApplyRefund(ctx context.Context, orderID, refundedAmount, tran
 	if newRefund > amount {
 		newRefund = amount
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO payment_observations(purchase_id,source,event_key,status,gross_amount,payload) VALUES($1,'status',$2,'refund',$3,jsonb_build_object('order_id',$4,'transaction_id',$5)) ON CONFLICT(purchase_id,source,event_key) DO NOTHING`, purchaseID, orderID+":"+transactionID+":refund:"+strconv.FormatInt(newRefund, 10), strconv.FormatInt(newRefund, 10), orderID, transactionID)
+	_, err = tx.Exec(ctx, `INSERT INTO payment_observations(purchase_id,source,event_key,status,gross_amount,payload) VALUES($1,'status',$2,'refund',$3,jsonb_build_object('order_id',$4::text,'transaction_id',$5::text)) ON CONFLICT(purchase_id,source,event_key) DO NOTHING`, purchaseID, orderID+":"+transactionID+":refund:"+strconv.FormatInt(newRefund, 10), strconv.FormatInt(newRefund, 10), orderID, transactionID)
 	if err != nil {
 		return err
 	}
 	if state != "settlement" && state != "refund" {
-		if canAdvancePurchase(state, "refund") {
+		if domain.PurchaseState(state).CanTransitionTo(domain.PurchaseRefunded) {
 			_, err = tx.Exec(ctx, `UPDATE purchases SET state='refund',refunded_idr=GREATEST(refunded_idr,$2),updated_at=now() WHERE id=$1`, purchaseID, newRefund)
 		} else {
 			_, err = tx.Exec(ctx, `UPDATE purchases SET refunded_idr=GREATEST(refunded_idr,$2),updated_at=now() WHERE id=$1`, purchaseID, newRefund)
@@ -494,15 +529,11 @@ func (s *Service) ApplyRefund(ctx context.Context, orderID, refundedAmount, tran
 		}
 		return tx.Commit(ctx)
 	}
-	var inserted bool
-	err = tx.QueryRow(ctx, `INSERT INTO credit_entries(tenant_id,delta_micros,kind,idempotency_key,source,snapshot) VALUES($1,$2,'reversal',$3,$4,jsonb_build_object('purchase_id',$5,'refunded_idr',$6)) ON CONFLICT(tenant_id,idempotency_key) DO NOTHING RETURNING true`, tenant, -int64(delta), "purchase:"+purchaseID+":refund:"+strconv.FormatInt(newRefund, 10), purchaseID, purchaseID, newRefund).Scan(&inserted)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	snapshot, err := json.Marshal(map[string]any{"purchase_id": purchaseID, "refunded_idr": newRefund})
+	if err != nil {
 		return err
 	}
-	if !inserted {
-		return tx.Commit(ctx)
-	}
-	_, err = tx.Exec(ctx, `UPDATE credit_accounts SET balance_micros=balance_micros-$2,version=version+1,updated_at=now() WHERE tenant_id=$1`, tenant, int64(delta))
+	err = s.Ledger.PostReversalInTx(ctx, tx, domain.TenantID(tenant), -delta, "purchase:"+purchaseID+":refund:"+strconv.FormatInt(newRefund, 10), purchaseID, snapshot)
 	if err != nil {
 		return err
 	}
@@ -511,23 +542,6 @@ func (s *Service) ApplyRefund(ctx context.Context, orderID, refundedAmount, tran
 		return err
 	}
 	return tx.Commit(ctx)
-}
-
-func canAdvancePurchase(current, next string) bool {
-	if current == next || current == "refund" {
-		return false
-	}
-	if current == "settlement" {
-		return next == "refund"
-	}
-	switch current {
-	case "pending":
-		return next == "settlement" || next == "deny" || next == "cancel" || next == "expire" || next == "refund"
-	case "deny", "cancel", "expire":
-		return next == "refund"
-	default:
-		return false
-	}
 }
 
 func refundCreditDelta(credits, amount, prior, current int64) domain.CreditMicros {

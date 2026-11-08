@@ -38,8 +38,29 @@ type ObservationSource interface {
 
 type Reconciler struct {
 	DB     *pgxpool.Pool
+	Meter  *Meter
+	Prices interface {
+		Current(context.Context, string) (domain.PriceSnapshot, error)
+	}
 	Source ObservationSource
 	Now    func() time.Time
+}
+
+func (r *Reconciler) ReadyTenants(ctx context.Context, limit int) ([]domain.TenantID, error) {
+	rows, err := r.DB.Query(ctx, `SELECT t.id FROM tenants t WHERE t.state='ready' AND t.dstack_provision_state='ready' ORDER BY COALESCE((SELECT min(c.updated_at) FROM dstack_poll_cursors c WHERE c.tenant_id=t.id),to_timestamp(0)),t.created_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []domain.TenantID
+	for rows.Next() {
+		var id domain.TenantID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 const observationOverlap = 24 * time.Hour
@@ -119,7 +140,10 @@ func (r *Reconciler) meterPersistedInstances(ctx context.Context, tenant domain.
 	}
 	rows.Close()
 
-	meter := &Meter{DB: r.DB}
+	meter := r.Meter
+	if meter == nil {
+		return errors.New("usage meter is unavailable")
+	}
 	for _, instance := range instances {
 		snapshot, err := decodeInstanceUsageSnapshot(instance.id, instance.version, instance.payload)
 		if err != nil {
@@ -138,12 +162,12 @@ func (r *Reconciler) meterPersistedInstances(ctx context.Context, tenant domain.
 			previous = &lastEnd
 		}
 		price := InstancePrice{}
-		err = r.DB.QueryRow(ctx, `SELECT hourly_usd_nano,rate_unit,verified,version FROM dstack_instance_prices WHERE price_key='default'`).Scan(&price.HourlyUSDNano, &price.RateUnit, &price.Verified, &price.Version)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			price = InstancePrice{}
+		if r.Prices != nil {
+			snapshot, priceErr := r.Prices.Current(ctx, "default")
+			if priceErr != nil && !errors.Is(priceErr, pgx.ErrNoRows) {
+				return priceErr
+			}
+			price = InstancePrice{HourlyUSDNano: snapshot.HourlyUSD, RateUnit: RateUnit(snapshot.RateUnit), Verified: snapshot.Verified, Version: snapshot.Version}
 		}
 		evidence, ok := BuildInstanceUsageEvidence(tenant, snapshot, price, now, previous)
 		if !ok {

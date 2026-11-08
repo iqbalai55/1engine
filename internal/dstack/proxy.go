@@ -55,7 +55,7 @@ type Proxy struct {
 	HTTP          *http.Client
 	Credentials   CredentialSource
 	EncryptionKey []byte
-	Ledger        *ledger.Service
+	Ledger        ledger.ReservationService
 	Policies      []RoutePolicy
 	PriceKey      string
 }
@@ -94,8 +94,8 @@ func defaultPolicies() []RoutePolicy {
 	}
 }
 
-func NewProxy(baseURL string, credentials CredentialSource, key []byte, ledger *ledger.Service) *Proxy {
-	return &Proxy{BaseURL: baseURL, Credentials: credentials, EncryptionKey: key, Ledger: ledger, Policies: defaultPolicies(), HTTP: &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, PriceKey: "default"}
+func NewProxy(baseURL string, credentials CredentialSource, key []byte, ledgerService *ledger.Service) *Proxy {
+	return &Proxy{BaseURL: baseURL, Credentials: credentials, EncryptionKey: key, Ledger: ledgerService, Policies: defaultPolicies(), HTTP: &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, PriceKey: "default"}
 }
 
 func (p *Proxy) classify(method, path, project string) (OperationKind, error) {

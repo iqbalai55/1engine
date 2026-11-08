@@ -175,9 +175,20 @@ type Purchase struct {
 
 type PriceSnapshot struct {
 	HourlyUSD  USDNano
+	RateUnit   string
 	Verified   bool
 	Version    string
 	ObservedAt time.Time
+}
+
+func (current PurchaseState) CanTransitionTo(next PurchaseState) bool {
+	if current == next || current == PurchaseRefunded {
+		return false
+	}
+	if current == PurchasePending {
+		return next == PurchaseSettlement || next == PurchaseDenied || next == PurchaseCancelled || next == PurchaseExpired || next == PurchaseRefunded
+	}
+	return next == PurchaseRefunded && (current == PurchaseSettlement || current == PurchaseDenied || current == PurchaseCancelled || current == PurchaseExpired)
 }
 
 func UsageCharge(start, end time.Time, rate USDNano, markup MarkupBPS) (CreditMicros, USDNano, error) {

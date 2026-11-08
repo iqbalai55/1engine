@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"billing-backend/internal/domain"
 	"billing-backend/internal/identity"
+	"billing-backend/internal/ledger"
 	"billing-backend/internal/store"
 )
 
@@ -195,7 +197,7 @@ func TestUsageIntervalsAreDeduplicatedAndUnverifiedRatesDoNotCharge(t *testing.T
 		_, _ = db.Pool.Exec(ctx, `DELETE FROM tenants WHERE id=$1`, tenant)
 		_, _ = db.Pool.Exec(ctx, `DELETE FROM users WHERE id=$1`, user)
 	}()
-	meter := Meter{DB: db.Pool}
+	meter := Meter{DB: db.Pool, Ledger: &ledger.Service{DB: db.Pool}}
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	evidence := UsageEvidence{Tenant: domain.TenantID(tenant), AllocationID: "allocation-1", SubmissionID: "submission-1", IntervalStart: start, IntervalEnd: start.Add(time.Hour), GPUCount: 1, Rate: 100_000_000, RateUnit: RateInstanceHour, PriceVerified: false, SourceVersion: "dstack-test", Provenance: map[string]any{"source": "test"}}
 	if err := meter.PostUsage(ctx, evidence); err != nil {
@@ -252,5 +254,72 @@ func TestUsageIntervalsAreDeduplicatedAndUnverifiedRatesDoNotCharge(t *testing.T
 	}
 	if !first || again {
 		t.Fatalf("event insert results were %v then %v", first, again)
+	}
+}
+
+func TestUsageDebitUsesLedgerInSameTransaction(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL is unset")
+	}
+	ctx := context.Background()
+	db, err := store.Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var user, tenant string
+	token, _, err := identity.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Pool.QueryRow(ctx, `INSERT INTO users(email,password_hash,email_verified_at) VALUES($1,'test',now()) RETURNING id`, "meter-ledger-"+token+"@example.test").Scan(&user); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Pool.QueryRow(ctx, `INSERT INTO tenants(owner_user_id,dstack_username,dstack_project,state,markup_bps) VALUES($1,$2,$3,'ready',1000) RETURNING id`, user, "meter-ledger-user-"+token, "meter-ledger-project-"+token).Scan(&tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Pool.Exec(ctx, `INSERT INTO credit_accounts(tenant_id,balance_micros) VALUES($1,1000000)`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM usage_records WHERE tenant_id=$1`, tenant)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM credit_entries WHERE tenant_id=$1`, tenant)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM credit_accounts WHERE tenant_id=$1`, tenant)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM tenants WHERE id=$1`, tenant)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM users WHERE id=$1`, user)
+	}()
+	meter := Meter{DB: db.Pool, Ledger: &ledger.Service{DB: db.Pool}}
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	evidence := UsageEvidence{Tenant: domain.TenantID(tenant), AllocationID: "allocation-ledger", IntervalStart: start, IntervalEnd: start.Add(time.Hour), GPUCount: 1, Rate: 100_000_000, RateUnit: RateInstanceHour, PriceVerified: true, SourceVersion: "dstack-ledger-test"}
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- meter.PostUsage(ctx, evidence)
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var balance domain.CreditMicros
+	if err := db.Pool.QueryRow(ctx, `SELECT balance_micros FROM credit_accounts WHERE tenant_id=$1`, tenant).Scan(&balance); err != nil {
+		t.Fatal(err)
+	}
+	var entries int
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM credit_entries WHERE tenant_id=$1 AND kind='usage'`, tenant).Scan(&entries); err != nil {
+		t.Fatal(err)
+	}
+	if balance != 890_000 || entries != 1 {
+		t.Fatalf("duplicate verified usage left balance %d and %d ledger entries, want 890000 and 1", balance, entries)
 	}
 }

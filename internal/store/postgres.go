@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -15,6 +17,12 @@ import (
 var migrationFiles embed.FS
 
 type Postgres struct{ Pool *pgxpool.Pool }
+
+type Querier interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
 
 func Open(ctx context.Context, url string) (*Postgres, error) {
 	pool, err := pgxpool.New(ctx, url)
