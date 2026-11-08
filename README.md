@@ -1,6 +1,10 @@
-# 1engine backend
+# 1engine
 
-The backend is a Go 1.22 Gin service with PostgreSQL. Domain packages own their tables and transaction boundaries. The HTTP package adapts portal, provider, payment, and dstack requests to those domains.
+1engine is a unified platform for AI inference and GPU computing. It brings together GPU infrastructure management, AI workload deployment, model-serving endpoints, and scalable compute jobs behind one customer-facing service. The backend provides a common integration layer for supported infrastructure and runtime platforms, so customers can manage workloads across providers through consistent account, usage, and billing services.
+
+The service manages customer accounts, provider integrations, GPU usage records, configurable pricing, prepaid credits, and payments. It uses Go 1.22, Gin, and PostgreSQL.
+
+The current release includes dstack integration. Beta9 is a planned provider integration. GPU usage intervals are recorded, but customer charges stay disabled until the deployed dstack version's instance price unit and basis are verified.
 
 ## Run the service
 
