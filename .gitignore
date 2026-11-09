@@ -4,3 +4,8 @@
 coverage/
 tmp/
 *.test
+
+deploy/.env
+deploy/*.pem
+deploy/*.key
+deploy/*.crt

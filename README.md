@@ -14,6 +14,8 @@ The current release includes dstack integration. Beta9 is a planned provider int
 4. Set `DSTACK_CUSTOMER_TOKEN_MODE=admin_refresh`. Provisioning fails closed if the installed dstack does not support this operation.
 5. Run `go run ./cmd/server` from `backend/`.
 
+To run the backend with a self-hosted dstack server and PostgreSQL in Docker, use [`deploy/README.md`](deploy/README.md).
+
 The service applies pending migrations at startup. The backend is organized as a modular monolith around identity, tenancy, API keys, ledger, payments, compute, pricing, and dstack contexts. Each context owns its rules and persistence. HTTP handlers and server workers call context operations without issuing SQL. Cross-context operations pass the same transaction where one business action must update multiple contexts atomically. PostgreSQL adapters remain in the context packages, and `internal/store` owns connections, transaction query types, and migrations. The configured listener still needs a TLS-terminating reverse proxy.
 
 ## Bootstrap the provider account

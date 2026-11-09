@@ -1,0 +1,192 @@
+name: 1inference
+
+x-backend-image: &backend-image
+  build:
+    context: ..
+  image: ${BACKEND_IMAGE:-1inference/backend:local}
+
+services:
+  cert-init:
+    build:
+      context: ./certs
+    image: ${CERT_INIT_IMAGE:-1inference/cert-init:local}
+    restart: "no"
+    volumes:
+      - ca-keys:/ca
+      - trust:/trust
+      - dstack-certs:/out/dstack
+      - postgres-certs:/out/postgres
+      - dstack-data:/dstack-server
+    networks:
+      - edge
+
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16}
+    restart: unless-stopped
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD in .env}
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      BILLING_DB_ROLE: billing
+      BILLING_DB_NAME: billing
+      BILLING_DB_PASSWORD: ${BILLING_DB_PASSWORD:?set BILLING_DB_PASSWORD in .env}
+      DSTACK_DB_ROLE: dstack
+      DSTACK_DB_NAME: dstack
+      DSTACK_DB_PASSWORD: ${DSTACK_DB_PASSWORD:?set DSTACK_DB_PASSWORD in .env}
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/certs/tls.crt
+      - -c
+      - ssl_key_file=/certs/tls.key
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - postgres-certs:/certs:ro
+      - ./postgres/init-databases.sh:/docker-entrypoint-initdb.d/10-init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username postgres --dbname postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - edge
+
+  dstack:
+    image: ${DSTACK_IMAGE:-dstackai/dstack:0.22.7}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cert-init:
+        condition: service_completed_successfully
+    environment:
+      DSTACK_SERVER_DIR: /root/.dstack/server
+      DSTACK_SERVER_URL: https://dstack-edge
+      DSTACK_SERVER_ADMIN_TOKEN: ${DSTACK_ADMIN_TOKEN:?set DSTACK_ADMIN_TOKEN in .env}
+      DSTACK_SERVER_LOG_FORMAT: rich
+      DSTACK_DO_NOT_UPDATE_DEFAULT_PROJECT: "1"
+      DSTACK_DATABASE_URL: postgresql+asyncpg://dstack:${DSTACK_DB_PASSWORD:?set DSTACK_DB_PASSWORD in .env}@postgres:5432/dstack?ssl=verify-full
+      PGSSLROOTCERT: /trust/ca.crt
+    volumes:
+      - dstack-data:/root/.dstack/server
+      - trust:/trust:ro
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/healthcheck > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - edge
+
+  caddy:
+    image: ${CADDY_IMAGE:-caddy:2.11-alpine}
+    restart: unless-stopped
+    depends_on:
+      dstack:
+        condition: service_healthy
+      cert-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - dstack-certs:/certs:ro
+    networks:
+      edge:
+        aliases:
+          - dstack-edge
+    ports:
+      - "127.0.0.1:${DSTACK_HTTPS_PORT:-8443}:443"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:2019/config/ > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  backend:
+    <<: *backend-image
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dstack:
+        condition: service_healthy
+      cert-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://billing:${BILLING_DB_PASSWORD:?set BILLING_DB_PASSWORD in .env}@postgres:5432/billing?sslmode=verify-full&sslrootcert=/trust/ca.crt
+      LISTEN_ADDR: ":8080"
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      DSTACK_ENCRYPTION_KEY: ${DSTACK_ENCRYPTION_KEY:?set DSTACK_ENCRYPTION_KEY in .env}
+      DSTACK_URL: https://dstack-edge
+      DSTACK_ADMIN_TOKEN: ${DSTACK_ADMIN_TOKEN:?set DSTACK_ADMIN_TOKEN in .env}
+      DSTACK_CUSTOMER_TOKEN_MODE: ${DSTACK_CUSTOMER_TOKEN_MODE:-admin_refresh}
+      MIDTRANS_ENVIRONMENT: ${MIDTRANS_ENVIRONMENT:-sandbox}
+      MIDTRANS_BASE_URL: ${MIDTRANS_BASE_URL:-}
+      MIDTRANS_STATUS_URL: ${MIDTRANS_STATUS_URL:-}
+      MIDTRANS_SERVER_KEY: ${MIDTRANS_SERVER_KEY:?set MIDTRANS_SERVER_KEY in .env}
+      MIDTRANS_CLIENT_KEY: ${MIDTRANS_CLIENT_KEY:?set MIDTRANS_CLIENT_KEY in .env}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL in .env}
+      SMTP_HOST: ${SMTP_HOST:?set SMTP_HOST in .env}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USER: ${SMTP_USER:?set SMTP_USER in .env}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:?set SMTP_PASSWORD in .env}
+      SMTP_FROM: ${SMTP_FROM:?set SMTP_FROM in .env}
+      SMTP_VERIFY_TLS: "true"
+      SSL_CERT_FILE: /trust/ca-bundle.pem
+    volumes:
+      - trust:/trust:ro
+    ports:
+      - "127.0.0.1:${BACKEND_HTTP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - edge
+
+  bootstrap:
+    <<: *backend-image
+    profiles:
+      - bootstrap
+    restart: "no"
+    entrypoint: ["/app/provider-bootstrap"]
+    command:
+      - provider-admin
+      - --email
+      - ${PROVIDER_ADMIN_EMAIL:?set PROVIDER_ADMIN_EMAIL in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cert-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://billing:${BILLING_DB_PASSWORD:?set BILLING_DB_PASSWORD in .env}@postgres:5432/billing?sslmode=verify-full&sslrootcert=/trust/ca.crt
+    volumes:
+      - trust:/trust:ro
+    networks:
+      - edge
+
+volumes:
+  postgres-data:
+  dstack-data:
+  ca-keys:
+  trust:
+  dstack-certs:
+  postgres-certs:
+
+networks:
+  edge:
+    driver: bridge
