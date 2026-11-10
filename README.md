@@ -14,6 +14,12 @@ The current release includes dstack integration. Beta9 is a planned provider int
 4. Set `DSTACK_CUSTOMER_TOKEN_MODE=admin_refresh`. Provisioning fails closed if the installed dstack does not support this operation.
 5. Run `go run ./cmd/server` from `backend/`.
 
+Set `PROVIDER_BACKENDS_FILE` to a read-only YAML file with one or more dstack backend
+definitions for `aws`, `gcp`, `nebius`, or `runpod`. The backend applies them to tenant
+projects and restricts customer fleet and run plans to those configured providers. Restart
+the service after editing the file. The current billing path applies the shared verified
+rate to every configured provider, so provider-specific price differences are not represented.
+
 The service applies pending migrations at startup. The backend is organized as a modular monolith around identity, tenancy, API keys, ledger, payments, compute, pricing, and dstack contexts. Each context owns its rules and persistence. HTTP handlers and server workers call context operations without issuing SQL. Cross-context operations pass the same transaction where one business action must update multiple contexts atomically. PostgreSQL adapters remain in the context packages, and `internal/store` owns connections, transaction query types, and migrations. The configured listener still needs a TLS-terminating reverse proxy.
 
 ## Bootstrap the provider account

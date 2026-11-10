@@ -36,6 +36,10 @@ func main() {
 	if err := db.Migrate(ctx); err != nil {
 		log.Fatal(err)
 	}
+	providerBackends, err := dstack.LoadProviderBackends(cfg.ProviderBackendsPath)
+	if err != nil {
+		log.Fatal(err)
+	}
 	mailer := identity.SMTPMailer{Host: cfg.SMTPHost, Port: os.Getenv("SMTP_PORT"), Username: cfg.SMTPUser, Password: cfg.SMTPPassword, From: cfg.SMTPFrom, PublicBaseURL: cfg.PublicBaseURL}
 	keyService := &apikey.Service{DB: db.Pool}
 	tenantService := &tenant.Service{DB: db.Pool}
@@ -45,9 +49,11 @@ func main() {
 	snap := payments.SnapClient{Config: payments.SnapConfig{ServerKey: cfg.MidtransServerKey, ClientKey: cfg.MidtransClientKey, BaseURL: cfg.MidtransBaseURL, StatusURL: cfg.MidtransStatusURL, Environment: cfg.MidtransEnvironment, PublicBaseURL: cfg.PublicBaseURL}}
 	paymentService := &payments.Service{DB: db.Pool, Ledger: ledgerService, Snap: snap}
 	proxy := dstack.NewProxy(cfg.DStackURL, tenantService, cfg.EncryptionKey, ledgerService)
-	provisioner := &dstack.Provisioner{Identity: identityService, Admin: dstack.AdminClient{BaseURL: cfg.DStackURL, Token: cfg.DStackAdminToken}, Tenant: tenantService, EncryptionKey: cfg.EncryptionKey, KeyVersion: "v1"}
+	proxy.Backends = providerBackends
+	provisioner := &dstack.Provisioner{Identity: identityService, Admin: dstack.AdminClient{BaseURL: cfg.DStackURL, Token: cfg.DStackAdminToken}, Tenant: tenantService, Backends: providerBackends, EncryptionKey: cfg.EncryptionKey, KeyVersion: "v1"}
 	reconciler := &compute.Reconciler{DB: db.Pool, Meter: &compute.Meter{DB: db.Pool, Ledger: ledgerService}, Prices: priceService, Source: &dstack.ObservationClient{BaseURL: cfg.DStackURL, Credentials: tenantService, Tenants: tenantService, EncryptionKey: cfg.EncryptionKey}}
 	go runProvisioner(ctx, provisioner)
+	go runProviderBackendSync(ctx, provisioner)
 	go runUsageReconciler(ctx, tenantService, reconciler)
 	go runPaymentReconciler(ctx, paymentService)
 	api := &httpapi.Server{Identity: identityService, Keys: keyService, Ledger: ledgerService, Meter: reconciler.Meter, Tenants: tenantService, Payments: paymentService, Pricing: priceService, DStack: proxy, PaymentServerKey: cfg.MidtransServerKey}
@@ -107,6 +113,24 @@ func runProvisioner(ctx context.Context, provisioner *dstack.Provisioner) {
 			return
 		case <-ticker.C:
 			_ = provisioner.ProvisionPending(ctx, 25)
+		}
+	}
+}
+
+func runProviderBackendSync(ctx context.Context, provisioner *dstack.Provisioner) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	if err := provisioner.SyncConfiguredBackends(ctx); err != nil {
+		log.Printf("provider backend sync failed: %v", err)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := provisioner.SyncConfiguredBackends(ctx); err != nil {
+				log.Printf("provider backend sync failed: %v", err)
+			}
 		}
 	}
 }

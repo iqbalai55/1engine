@@ -2,6 +2,7 @@ package dstack
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -50,9 +51,31 @@ func TestAdminClientUsesDocumentedProvisioningPayloadsAndRefreshesToken(t *testi
 		`{"username":"tenant-user"}`,
 	}
 	for i, request := range requests {
-		if request.path != wantPaths[i] || request.body != wantBodies[i] || request.auth != "Bearer admin-secret" {
-			t.Errorf("request %d = %s %s auth=%q, want %s %s auth=admin", i, request.path, request.body, request.auth, wantPaths[i], wantBodies[i])
+		if i >= len(wantPaths) || request.path != wantPaths[i] || request.body != wantBodies[i] || request.auth != "Bearer admin-secret" {
+			t.Errorf("request %d = %s %s auth=%q", i, request.path, request.body, request.auth)
 		}
+	}
+	if len(requests) != len(wantPaths) {
+		t.Fatalf("request count = %d, want %d", len(requests), len(wantPaths))
+	}
+}
+
+func TestAdminClientClassifiesDStackResourceErrors(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		if r.URL.Path == "/missing" {
+			_, _ = w.Write([]byte(`{"detail":[{"code":"resource_not_exists"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"detail":[{"code":"resource_exists"}]}`))
+	}))
+	defer server.Close()
+	client := AdminClient{BaseURL: server.URL, Token: "admin-secret", HTTP: server.Client()}
+	if err := client.post(context.Background(), "/missing", map[string]any{}, nil); !errors.Is(err, errResourceNotFound) {
+		t.Fatalf("missing-resource error = %v", err)
+	}
+	if err := client.post(context.Background(), "/exists", map[string]any{}, nil); !errors.Is(err, errResourceExists) {
+		t.Fatalf("existing-resource error = %v", err)
 	}
 }
 

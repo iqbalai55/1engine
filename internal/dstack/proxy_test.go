@@ -45,6 +45,9 @@ func TestPolicyAllowsDocumentedOperationsAndRejectsOthers(t *testing.T) {
 		{http.MethodPost, "/api/projects/acme/add_members"},
 		{http.MethodPost, "/api/projects/acme/update"},
 		{http.MethodPost, "/api/project/other/runs/get"},
+		{http.MethodPost, "/api/project/acme/backends/aws/config_info"},
+		{http.MethodPost, "/api/project/acme/backends/aws/get_yaml"},
+		{http.MethodPost, "/api/project/acme/backends/create_yaml"},
 		{http.MethodPost, "/api/project/acme/runs/apply/extra"},
 		{http.MethodPost, "/api/project/acme/runs/import"},
 		{http.MethodPost, "/api/project/acme/runs/apply/future"},
@@ -55,6 +58,44 @@ func TestPolicyAllowsDocumentedOperationsAndRejectsOthers(t *testing.T) {
 		if _, err := p.classify(test.method, test.path, "acme"); err == nil {
 			t.Errorf("%s %s was allowed", test.method, test.path)
 		}
+	}
+}
+
+func TestConfiguredBackendPlansStayWithinEnabledProviderSet(t *testing.T) {
+	backends, err := ParseProviderBackends([]byte("backends:\n  - type: aws\n  - type: runpod\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := NewProxy("https://dstack.invalid", nil, nil, nil)
+	proxy.Backends = backends
+	cases := []struct {
+		name string
+		path string
+		body string
+		want string
+		fail bool
+	}{
+		{"fleet defaults to configured backends", "/api/project/acme/fleets/apply", `{"plan":{"spec":{"configuration":{"type":"fleet"},"profile":{}}},"force":false}`, `"backends":["aws","runpod"]`, false},
+		{"fleet accepts configured selection", "/api/project/acme/fleets/get_plan", `{"spec":{"configuration":{"type":"fleet","backends":["aws"]},"profile":{}}}`, `"backends":["aws"]`, false},
+		{"run checks configuration backend", "/api/project/acme/runs/apply", `{"plan":{"run_spec":{"configuration":{"type":"task","backends":["vastai"]},"profile":{"backends":["aws"]}}},"force":false}`, "", true},
+		{"run resolves profile precedence", "/api/project/acme/runs/apply", `{"plan":{"run_spec":{"configuration":{"type":"task","backends":["runpod"]},"profile":{"backends":["aws"]}}},"force":false}`, `"backends":["runpod"]`, false},
+		{"run default provider selection", "/api/project/acme/runs/get_plan", `{"run_spec":{"configuration":{"type":"task"}}}`, `"backends":["aws","runpod"]`, false},
+		{"empty provider selection is rejected", "/api/project/acme/fleets/apply", `{"plan":{"spec":{"configuration":{"type":"fleet","backends":[]},"profile":{}}},"force":false}`, "", true},
+		{"ssh fleets are rejected", "/api/project/acme/fleets/apply", `{"plan":{"spec":{"configuration":{"type":"fleet","ssh_config":{"hosts":["host"]}},"profile":{}}},"force":false}`, "", true},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := proxy.bindProviderBackends([]byte(test.body), test.path)
+			if test.fail {
+				if err == nil {
+					t.Fatal("invalid provider selection was accepted")
+				}
+				return
+			}
+			if err != nil || !strings.Contains(string(got), test.want) {
+				t.Fatalf("bound request = %s, %v, want %q", got, err, test.want)
+			}
+		})
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -54,6 +55,7 @@ type Proxy struct {
 	BaseURL       string
 	HTTP          *http.Client
 	Credentials   CredentialSource
+	Backends      ProviderBackends
 	EncryptionKey []byte
 	Ledger        ledger.ReservationService
 	Policies      []RoutePolicy
@@ -73,12 +75,12 @@ func defaultPolicies() []RoutePolicy {
 		pattern("POST", `^/api/instances/list$`, OperationRead),
 		pattern("POST", `^/api/events/list$`, OperationRead),
 		pattern("POST", `^/api/projects/[^/]+/get$`, OperationRead),
-		pattern("POST", `^/api/project/[^/]+/(backends/[^/]+/(config_info|get_yaml)|runs/(get|get_plan)|fleets/(list|get|get_plan)|instances/(get|get_instance_health_checks)|repos/(list|get)|gpus/list|logs/poll|secrets/(list|get)|gateways/(list|get|get_plan)|volumes/(list|get)|templates/list|exports/list)$`, OperationRead),
+		pattern("POST", `^/api/project/[^/]+/(runs/(get|get_plan)|fleets/(list|get|get_plan)|instances/(get|get_instance_health_checks)|repos/(list|get)|gpus/list|logs/poll|secrets/(list|get)|gateways/(list|get|get_plan)|volumes/(list|get)|templates/list|exports/list)$`, OperationRead),
 		pattern("POST", `^/api/project/[^/]+/runs/apply$`, OperationStart),
 		pattern("POST", `^/api/project/[^/]+/fleets/apply$`, OperationStart),
 		pattern("POST", `^/api/project/[^/]+/gateways/(apply|create)$`, OperationStart),
-		pattern("POST", `^/api/project/[^/]+/(runs/(stop|delete)|fleets/(delete|delete_instances)|volumes/delete|backends/delete|gateways/delete|secrets/delete|repos/delete|exports/delete|imports/delete)$`, OperationStop),
-		pattern("POST", `^/api/project/[^/]+/(backends/(create|update|create_yaml|update_yaml)|presets/push|secrets/create_or_update|repos/(init|upload_code)|exports/(create|update)|gateways/(set_default|set_wildcard_domain))$`, OperationMutation),
+		pattern("POST", `^/api/project/[^/]+/(runs/(stop|delete)|fleets/(delete|delete_instances)|volumes/delete|gateways/delete|secrets/delete|repos/delete|exports/delete|imports/delete)$`, OperationStop),
+		pattern("POST", `^/api/project/[^/]+/(presets/push|secrets/create_or_update|repos/(init|upload_code)|exports/(create|update)|gateways/(set_default|set_wildcard_domain))$`, OperationMutation),
 		pattern("POST", `^/api/project/[^/]+/volumes/create$`, OperationMutation),
 		pattern("POST", `^/api/project/[^/]+/presets/(get|get_files)$`, OperationRead),
 		pattern("POST", `^/api/users/public_keys/list$`, OperationRead),
@@ -96,6 +98,149 @@ func defaultPolicies() []RoutePolicy {
 
 func NewProxy(baseURL string, credentials CredentialSource, key []byte, ledgerService *ledger.Service) *Proxy {
 	return &Proxy{BaseURL: baseURL, Credentials: credentials, EncryptionKey: key, Ledger: ledgerService, Policies: defaultPolicies(), HTTP: &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, PriceKey: "default"}
+}
+
+type backendPlanKind uint8
+
+const (
+	fleetPlan backendPlanKind = iota + 1
+	runPlan
+)
+
+type backendPlanRoute struct {
+	kind          backendPlanKind
+	pathSuffix    string
+	accessors     []string
+	configuration bool
+}
+
+var backendPlanRoutes = []backendPlanRoute{
+	{kind: fleetPlan, pathSuffix: "/fleets/get_plan", accessors: []string{"spec"}, configuration: true},
+	{kind: fleetPlan, pathSuffix: "/fleets/apply", accessors: []string{"plan", "spec"}, configuration: true},
+	{kind: runPlan, pathSuffix: "/runs/get_plan", accessors: []string{"run_spec"}},
+	{kind: runPlan, pathSuffix: "/runs/apply", accessors: []string{"plan", "run_spec"}},
+}
+
+func backendPlanForPath(path string) (backendPlanRoute, bool) {
+	for _, route := range backendPlanRoutes {
+		if strings.HasSuffix(path, route.pathSuffix) {
+			return route, true
+		}
+	}
+	return backendPlanRoute{}, false
+}
+
+func (p *Proxy) bindProviderBackends(raw []byte, path string) ([]byte, error) {
+	route, ok := backendPlanForPath(path)
+	if !ok {
+		return raw, nil
+	}
+	if len(p.Backends.Types()) == 0 {
+		return nil, errors.New("no compute backends are configured")
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, errors.New("dstack request body must be valid JSON")
+	}
+	spec := objectAt(body, route.accessors...)
+	if spec == nil {
+		return nil, errors.New("dstack fleet or run plan is missing its specification")
+	}
+	configuration, ok := spec["configuration"].(map[string]any)
+	if !ok {
+		return nil, errors.New("dstack plan is missing its configuration")
+	}
+	if route.configuration {
+		if sshConfig, exists := configuration["ssh_config"]; exists && sshConfig != nil {
+			return nil, errors.New("customer SSH fleets are not supported")
+		}
+	}
+	profile, _ := spec["profile"].(map[string]any)
+	if err := bindConfiguredBackends(configuration, profile, p.Backends); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return nil, errors.New("dstack request body could not be encoded")
+	}
+	return encoded, nil
+}
+
+func objectAt(value map[string]any, keys ...string) map[string]any {
+	for _, key := range keys {
+		next, ok := value[key].(map[string]any)
+		if !ok {
+			return nil
+		}
+		value = next
+	}
+	return value
+}
+
+func configuredBackendSelection(spec map[string]any, allowed ProviderBackends) ([]string, bool, error) {
+	raw, exists := spec["backends"]
+	if !exists {
+		return nil, false, nil
+	}
+	requested, ok := raw.([]any)
+	if !ok || len(requested) == 0 {
+		return nil, true, errors.New("dstack backends must be a non-empty list of backend types")
+	}
+	selected := make([]string, 0, len(requested))
+	for _, value := range requested {
+		backendType, ok := value.(string)
+		if !ok || !allowed.Allows(backendType) {
+			return nil, true, errors.New("fleet or run selects a backend that is not enabled")
+		}
+		if slices.Contains(selected, backendType) {
+			return nil, true, errors.New("dstack backend selection contains duplicates")
+		}
+		selected = append(selected, backendType)
+	}
+	return selected, true, nil
+}
+
+func bindConfiguredBackends(configuration, profile map[string]any, allowed ProviderBackends) error {
+	configurationTypes, configurationSet, err := configuredBackendSelection(configuration, allowed)
+	if err != nil {
+		return err
+	}
+	profileTypes, profileSet := []string(nil), false
+	if profile != nil {
+		profileTypes, profileSet, err = configuredBackendSelection(profile, allowed)
+		if err != nil {
+			return err
+		}
+	}
+	if configurationSet && profileSet && !slices.Equal(configurationTypes, profileTypes) {
+		setConfiguredBackendSelection(profile, configurationTypes)
+		return nil
+	}
+	if configurationSet || profileSet {
+		return nil
+	}
+	configured := backendTypes(allowed.Types())
+	setConfiguredBackendSelection(configuration, configured)
+	if profile != nil {
+		setConfiguredBackendSelection(profile, configured)
+	}
+	return nil
+}
+
+func backendTypes(types []BackendType) []string {
+	result := make([]string, 0, len(types))
+	for _, backendType := range types {
+		result = append(result, string(backendType))
+	}
+	return result
+}
+
+func setConfiguredBackendSelection(spec map[string]any, types []string) {
+	backends := make([]any, 0, len(types))
+	for _, backendType := range types {
+		backends = append(backends, backendType)
+	}
+	spec["backends"] = backends
 }
 
 func (p *Proxy) classify(method, path, project string) (OperationKind, error) {
@@ -157,6 +302,18 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 	}
 	if kind == OperationStart && strings.TrimSpace(op.IdempotencyKey) == "" {
 		return SafeResponse{}, errors.New("compute start requires an Idempotency-Key")
+	}
+	if _, isPlan := backendPlanForPath(op.Path); isPlan {
+		if len(op.Body) == 0 || !strings.Contains(strings.ToLower(op.Headers.Get("Content-Type")), "json") {
+			return SafeResponse{}, errors.New("dstack fleet and run plans require a JSON body")
+		}
+		if !json.Valid(op.Body) {
+			return SafeResponse{}, errors.New("dstack request body must be valid JSON")
+		}
+		op.Body, err = p.bindProviderBackends(op.Body, op.Path)
+		if err != nil {
+			return SafeResponse{}, err
+		}
 	}
 	if p.Credentials == nil {
 		return SafeResponse{}, domain.ErrTenantUnavailable

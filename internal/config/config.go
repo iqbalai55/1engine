@@ -9,46 +9,48 @@ import (
 )
 
 type Config struct {
-	DatabaseURL         string
-	ListenAddr          string
-	SessionSecret       []byte
-	EncryptionKey       []byte
-	DStackURL           string
-	DStackAdminToken    string
-	DStackTokenMode     string
-	MidtransServerKey   string
-	MidtransClientKey   string
-	MidtransBaseURL     string
-	MidtransStatusURL   string
-	MidtransEnvironment string
-	PublicBaseURL       string
-	SMTPHost            string
-	SMTPPort            int
-	SMTPUser            string
-	SMTPPassword        string
-	SMTPFrom            string
-	VerifyTLS           bool
+	DatabaseURL          string
+	ListenAddr           string
+	SessionSecret        []byte
+	EncryptionKey        []byte
+	DStackURL            string
+	DStackAdminToken     string
+	DStackTokenMode      string
+	ProviderBackendsPath string
+	MidtransServerKey    string
+	MidtransClientKey    string
+	MidtransBaseURL      string
+	MidtransStatusURL    string
+	MidtransEnvironment  string
+	PublicBaseURL        string
+	SMTPHost             string
+	SMTPPort             int
+	SMTPUser             string
+	SMTPPassword         string
+	SMTPFrom             string
+	VerifyTLS            bool
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		DatabaseURL:         os.Getenv("DATABASE_URL"),
-		ListenAddr:          os.Getenv("LISTEN_ADDR"),
-		SessionSecret:       []byte(os.Getenv("SESSION_SECRET")),
-		EncryptionKey:       []byte(os.Getenv("DSTACK_ENCRYPTION_KEY")),
-		DStackURL:           os.Getenv("DSTACK_URL"),
-		DStackAdminToken:    os.Getenv("DSTACK_ADMIN_TOKEN"),
-		DStackTokenMode:     os.Getenv("DSTACK_CUSTOMER_TOKEN_MODE"),
-		MidtransServerKey:   os.Getenv("MIDTRANS_SERVER_KEY"),
-		MidtransClientKey:   os.Getenv("MIDTRANS_CLIENT_KEY"),
-		MidtransBaseURL:     os.Getenv("MIDTRANS_BASE_URL"),
-		MidtransStatusURL:   os.Getenv("MIDTRANS_STATUS_URL"),
-		MidtransEnvironment: os.Getenv("MIDTRANS_ENVIRONMENT"),
-		PublicBaseURL:       os.Getenv("PUBLIC_BASE_URL"),
-		SMTPHost:            os.Getenv("SMTP_HOST"),
-		SMTPUser:            os.Getenv("SMTP_USER"),
-		SMTPPassword:        os.Getenv("SMTP_PASSWORD"),
-		SMTPFrom:            os.Getenv("SMTP_FROM"),
+		DatabaseURL:          os.Getenv("DATABASE_URL"),
+		ListenAddr:           os.Getenv("LISTEN_ADDR"),
+		SessionSecret:        []byte(os.Getenv("SESSION_SECRET")),
+		EncryptionKey:        []byte(os.Getenv("DSTACK_ENCRYPTION_KEY")),
+		DStackURL:            os.Getenv("DSTACK_URL"),
+		DStackAdminToken:     os.Getenv("DSTACK_ADMIN_TOKEN"),
+		DStackTokenMode:      os.Getenv("DSTACK_CUSTOMER_TOKEN_MODE"),
+		ProviderBackendsPath: os.Getenv("PROVIDER_BACKENDS_FILE"),
+		MidtransServerKey:    os.Getenv("MIDTRANS_SERVER_KEY"),
+		MidtransClientKey:    os.Getenv("MIDTRANS_CLIENT_KEY"),
+		MidtransBaseURL:      os.Getenv("MIDTRANS_BASE_URL"),
+		MidtransStatusURL:    os.Getenv("MIDTRANS_STATUS_URL"),
+		MidtransEnvironment:  os.Getenv("MIDTRANS_ENVIRONMENT"),
+		PublicBaseURL:        os.Getenv("PUBLIC_BASE_URL"),
+		SMTPHost:             os.Getenv("SMTP_HOST"),
+		SMTPUser:             os.Getenv("SMTP_USER"),
+		SMTPPassword:         os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:             os.Getenv("SMTP_FROM"),
 	}
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = ":8080"

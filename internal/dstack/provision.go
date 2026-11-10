@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"billing-backend/internal/domain"
 	"billing-backend/internal/identity"
@@ -24,6 +28,7 @@ type Provisioner struct {
 	Identity      *identity.Service
 	Admin         AdminClient
 	Tenant        *tenant.Service
+	Backends      ProviderBackends
 	EncryptionKey []byte
 	KeyVersion    string
 }
@@ -62,7 +67,25 @@ type projectResponse struct {
 	} `json:"members"`
 }
 
-var errResourceExists = errors.New("dstack resource already exists")
+var (
+	errResourceExists   = errors.New("dstack resource already exists")
+	errResourceNotFound = errors.New("dstack resource does not exist")
+)
+
+type dstackError struct {
+	Detail []struct {
+		Code string `json:"code"`
+	} `json:"detail"`
+}
+
+func (e dstackError) code() string {
+	for _, detail := range e.Detail {
+		if detail.Code != "" {
+			return detail.Code
+		}
+	}
+	return ""
+}
 
 func (c AdminClient) post(ctx context.Context, path string, input, output any) error {
 	if c.BaseURL == "" || c.Token == "" {
@@ -94,8 +117,25 @@ func (c AdminClient) post(ctx context.Context, path string, input, output any) e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if resp.StatusCode == http.StatusConflict {
-			return errResourceExists
+		if resp.StatusCode == http.StatusNotFound {
+			return errResourceNotFound
+		}
+		if resp.StatusCode == http.StatusBadRequest {
+			var response dstackError
+			if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&response); err == nil {
+				code := response.code()
+				switch code {
+				case "resource_exists":
+					return errResourceExists
+				case "resource_not_exists":
+					return errResourceNotFound
+				case "invalid_credentials", "backend_not_available":
+					return fmt.Errorf("dstack admin operation failed: %s", code)
+				}
+				if code != "" {
+					return fmt.Errorf("dstack admin operation returned status %d (%s)", resp.StatusCode, code)
+				}
+			}
 		}
 		return fmt.Errorf("dstack admin operation returned status %d", resp.StatusCode)
 	}
@@ -119,6 +159,86 @@ func (c AdminClient) RefreshToken(ctx context.Context, username string) (string,
 		return "", errors.New("dstack customer token refresh returned no token")
 	}
 	return response.Creds.Token, nil
+}
+
+func (c AdminClient) ApplyBackendConfig(ctx context.Context, project string, backend ProviderBackend) error {
+	readPath, err := backendConfigReadPath(project, backend.Type)
+	if err != nil {
+		return err
+	}
+	var current struct {
+		ConfigYAML string `json:"config_yaml"`
+	}
+	readErr := c.post(ctx, readPath, map[string]any{}, &current)
+	writePath, err := backendConfigWritePath(project, backend.Type, false)
+	if err != nil {
+		return err
+	}
+	if readErr == nil {
+		equal, err := sameEffectiveBackendConfig(current.ConfigYAML, backend.YAML, backend.Type)
+		if err != nil {
+			return errors.New("dstack returned an invalid provider backend config")
+		}
+		if equal {
+			return nil
+		}
+		writePath, err = backendConfigWritePath(project, backend.Type, true)
+		if err != nil {
+			return err
+		}
+	} else if !errors.Is(readErr, errResourceNotFound) {
+		return fmt.Errorf("read existing dstack provider backend: %w", readErr)
+	}
+	return c.post(ctx, writePath, map[string]string{"config_yaml": backend.YAML}, nil)
+}
+
+func backendConfigReadPath(project string, backendType BackendType) (string, error) {
+	if _, ok := supportedBackendTypes[backendType]; !ok {
+		return "", errors.New("unsupported provider backend type")
+	}
+	if strings.TrimSpace(project) == "" || strings.ContainsAny(project, "/\\") {
+		return "", errors.New("dstack project name is invalid")
+	}
+	return "/api/project/" + url.PathEscape(project) + "/backends/" + string(backendType) + "/get_yaml", nil
+}
+
+func backendConfigWritePath(project string, backendType BackendType, update bool) (string, error) {
+	if _, ok := supportedBackendTypes[backendType]; !ok {
+		return "", errors.New("unsupported provider backend type")
+	}
+	if strings.TrimSpace(project) == "" || strings.ContainsAny(project, "/\\") {
+		return "", errors.New("dstack project name is invalid")
+	}
+	action := "create_yaml"
+	if update {
+		action = "update_yaml"
+	}
+	return "/api/project/" + url.PathEscape(project) + "/backends/" + action, nil
+}
+
+func sameEffectiveBackendConfig(actualYAML, desiredYAML string, backendType BackendType) (bool, error) {
+	var actual any
+	if err := yaml.Unmarshal([]byte(actualYAML), &actual); err != nil {
+		return false, err
+	}
+	var desired any
+	if err := yaml.Unmarshal([]byte(desiredYAML), &desired); err != nil {
+		return false, err
+	}
+	actualMap, actualOK := actual.(map[string]any)
+	desiredMap, desiredOK := desired.(map[string]any)
+	if !actualOK || !desiredOK {
+		return false, errors.New("backend config must be a YAML mapping")
+	}
+	if _, regionsSpecified := desiredMap["regions"]; !regionsSpecified {
+		delete(actualMap, "regions")
+	}
+	if backendType == BackendGCP {
+		if credentials, ok := actualMap["creds"].(map[string]any); ok && credentials["filename"] == "" {
+			delete(credentials, "filename")
+		}
+	}
+	return reflect.DeepEqual(actualMap, desiredMap), nil
 }
 
 func (p *Provisioner) Provision(ctx context.Context, id domain.TenantID) error {
@@ -178,6 +298,9 @@ func (p *Provisioner) Provision(ctx context.Context, id domain.TenantID) error {
 			return p.failed(ctx, id, errors.New("existing dstack project membership does not match tenant identity"))
 		}
 	}
+	if err := p.applyBackends(ctx, string(t.DStack.Project)); err != nil {
+		return p.failed(ctx, id, err)
+	}
 	if p.Admin.Token == "" || strings.TrimSpace(p.Admin.BaseURL) == "" {
 		return p.failed(ctx, id, errors.New("dstack admin refresh-token compatibility is not configured"))
 	}
@@ -193,6 +316,36 @@ func (p *Provisioner) Provision(ctx context.Context, id domain.TenantID) error {
 	}
 	if err = p.Tenant.SaveCustomerCredential(ctx, id, secret, p.EncryptionKey, p.KeyVersion); err != nil {
 		return p.failed(ctx, id, err)
+	}
+	return nil
+}
+
+func (p *Provisioner) SyncConfiguredBackends(ctx context.Context) error {
+	if len(p.Backends.Types()) == 0 {
+		return nil
+	}
+	tenants, err := p.Tenant.List(ctx)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, current := range tenants {
+		if current.DStack.Provision != domain.ProvisionReady || current.State == domain.TenantSuspended {
+			continue
+		}
+		if err := p.applyBackends(ctx, string(current.DStack.Project)); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (p *Provisioner) applyBackends(ctx context.Context, project string) error {
+	for _, backendType := range p.Backends.Types() {
+		backend, _ := p.Backends.Get(backendType)
+		if err := p.Admin.ApplyBackendConfig(ctx, project, backend); err != nil {
+			return err
+		}
 	}
 	return nil
 }
