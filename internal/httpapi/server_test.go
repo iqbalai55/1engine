@@ -210,6 +210,26 @@ func TestRateLimitAdvancesAllowedHandler(t *testing.T) {
 	}
 }
 
+func TestTenantRateLimitSharesBucketAcrossClientIPs(t *testing.T) {
+	server := &Server{Limiter: newRequestLimiter()}
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), principalKey, principal{TenantID: "tenant-a", Kind: "api"}))
+		c.Next()
+	})
+	router.GET("/", server.rateLimitBy("proxy", 2, time.Minute, tenantKey), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	want := []int{http.StatusNoContent, http.StatusNoContent, http.StatusTooManyRequests}
+	for i, addr := range []string{"192.0.2.41:1234", "192.0.2.42:1234", "192.0.2.43:1234"} {
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		request.RemoteAddr = addr
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != want[i] {
+			t.Fatalf("request %d from %s status = %d, want %d", i, addr, recorder.Code, want[i])
+		}
+	}
+}
+
 func TestRequestLimiterEnforcesLimitAndWindowExpiry(t *testing.T) {
 	limiter := newRequestLimiter()
 	start := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
@@ -260,6 +280,58 @@ func TestSignupRateLimitCallsIdentityForAllowedRequest(t *testing.T) {
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusAccepted || identity.signUpCalls != 1 {
 		t.Fatalf("allowed signup response = %d with %d identity calls, want 202 and one call", recorder.Code, identity.signUpCalls)
+	}
+}
+
+func TestLoginAccountRateLimitHoldsAcrossClientIPs(t *testing.T) {
+	identity := &identityStub{loginError: errors.New("invalid email or password")}
+	router := (&Server{Identity: identity}).Router()
+	for i := 0; i < 11; i++ {
+		request := httptest.NewRequest(http.MethodPost, "/v1/login", strings.NewReader(`{"email":"Victim@Example.test","password":"guess-password-1"}`))
+		request.RemoteAddr = fmt.Sprintf("198.51.100.%d:1234", i+1)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if i < 10 && recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want 401 from identity", i+1, recorder.Code)
+		}
+		if i == 10 && recorder.Code != http.StatusTooManyRequests {
+			t.Fatalf("attempt 11 status = %d, want 429", recorder.Code)
+		}
+	}
+	if identity.loginCalls != 10 {
+		t.Fatalf("identity login calls = %d, want 10", identity.loginCalls)
+	}
+}
+
+func TestForwardedForIsIgnoredWithoutTrustedProxy(t *testing.T) {
+	identity := &identityStub{}
+	router := (&Server{Identity: identity}).Router()
+	statuses := []int{}
+	for i := 0; i < 6; i++ {
+		request := httptest.NewRequest(http.MethodPost, "/v1/signup", strings.NewReader(`{"email":"user@example.test","password":"long-enough-password"}`))
+		request.RemoteAddr = "203.0.113.9:1234"
+		request.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i+1))
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		statuses = append(statuses, recorder.Code)
+	}
+	if statuses[5] != http.StatusTooManyRequests {
+		t.Fatalf("statuses with rotating X-Forwarded-For = %v, want the sixth signup limited", statuses)
+	}
+}
+
+func TestForwardedForIsHonoredFromTrustedProxy(t *testing.T) {
+	identity := &identityStub{}
+	router := (&Server{Identity: identity, TrustedProxies: []string{"203.0.113.0/24"}}).Router()
+	for i := 0; i < 6; i++ {
+		request := httptest.NewRequest(http.MethodPost, "/v1/signup", strings.NewReader(`{"email":"user@example.test","password":"long-enough-password"}`))
+		request.RemoteAddr = "203.0.113.9:1234"
+		request.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i+1))
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("signup %d from distinct forwarded client status = %d, want 202", i+1, recorder.Code)
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -23,6 +24,7 @@ type Config struct {
 	MidtransStatusURL    string
 	MidtransEnvironment  string
 	PublicBaseURL        string
+	TrustedProxyCIDRs    []string
 	SMTPHost             string
 	SMTPPort             int
 	SMTPUser             string
@@ -60,6 +62,16 @@ func Load() (Config, error) {
 	}
 	if cfg.DStackTokenMode != "admin_refresh" {
 		return Config{}, errors.New("DSTACK_CUSTOMER_TOKEN_MODE must be admin_refresh; the installed dstack must support /api/users/refresh_token")
+	}
+	for _, raw := range strings.Split(os.Getenv("TRUSTED_PROXY_CIDRS"), ",") {
+		cidr := strings.TrimSpace(raw)
+		if cidr == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return Config{}, errors.New("TRUSTED_PROXY_CIDRS must contain only CIDR ranges")
+		}
+		cfg.TrustedProxyCIDRs = append(cfg.TrustedProxyCIDRs, cidr)
 	}
 	if cfg.VerifyTLS, _ = strconv.ParseBool(os.Getenv("SMTP_VERIFY_TLS")); !cfg.VerifyTLS {
 		return Config{}, errors.New("SMTP_VERIFY_TLS must be true")
