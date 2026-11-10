@@ -56,7 +56,7 @@ TEST_DATABASE_URL='postgres://billing_test:secret@localhost:5432/billing_test?ss
 
 ## Billing limitation
 
-The dstack observation worker records instance runtime intervals. It does not charge intervals until the installed dstack release's instance price unit and basis are verified. The published instance schema does not define those semantics. Keep customer compute blocked until the provider configures a verified USD-per-hour rate and the deployed rate matches it.
+The dstack observation worker records instance runtime intervals. It does not charge intervals until the installed dstack release's instance price unit and basis are verified. The dstack metrics documentation defines `dstack_instance_price_dollars_per_hour` as the instance price in USD per hour, which is one price for the whole instance regardless of GPU count. The published instance schema does not state this. Keep customer compute blocked until one live instance confirms that its reported price matches the provider's console price for the same instance type, and until the provider configures a verified USD-per-hour rate that matches it.
 
 ## Main routes
 

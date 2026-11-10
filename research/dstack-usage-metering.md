@@ -3,6 +3,8 @@
 **Research date:** 2026-11-08
 **Scope:** Official dstack documentation, the official generated OpenAPI document, and first-party `dstackai/dstack` source only. This describes the currently published API, not a guarantee that every older self-hosted server exposes the same schema.
 
+**Update 2026-11-10:** The dstack metrics page defines `dstack_instance_price_dollars_per_hour` as "Instance price, USD/hour", with the example `16.0` for an instance with `dstack_instance_gpu_count` of `4.0`. The release 0.20.28 offer list also prices whole instances (`B200:180GB:1` at $5.65, `B200:180GB:8` at $50.12). The unit is therefore per instance, not per GPU. This applies to the metrics and offer outputs. The instance schema in the OpenAPI document still does not state the unit, so the live check in `docs/dstack-tutorial.md` remains required before a verified rate is set. The "unit undocumented" statements below predate this update.
+
 ## Executive summary
 
 dstack exposes useful data for constructing a commercial usage ledger: actual job/instance resource shape, GPU count and model, prices/rates, lifecycle states and timestamps, user/project attribution, and event history. The best source for realized compute is a combination of run/job data and instance data; job and instance metrics also expose runtime-seconds and USD/hour.

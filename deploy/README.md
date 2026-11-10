@@ -123,8 +123,8 @@ curl --cacert ca-bundle.pem -X POST "https://localhost:${DSTACK_HTTPS_PORT}/api/
   -d @backend.yml
 ```
 
-The deployment does not inject a backend into any tenant project. You own that file and
-its cloud credentials.
+This operator project needs a backend only for your own runs. Tenant projects receive the
+backends listed in `PROVIDER_BACKENDS_FILE` automatically. See `docs/dstack-tutorial.md`.
 
 ## Ports
 
@@ -195,5 +195,6 @@ invalidates every leaf certificate that the old one signed.
 - No public dstack port. The TLS endpoint is bound to loopback.
 - No frontend container. The dstack UI ships inside the dstack image, and the billing
   frontend is served separately.
-- No tenant backend injection. The backend creates dstack users and projects, but it
-  never writes backend configuration into a project.
+- Tenant backends come only from `deploy/provider-backends.yml`, which compose mounts at
+  `PROVIDER_BACKENDS_FILE`. The file must exist before `docker compose up`. See
+  `docs/dstack-tutorial.md`, step 5.

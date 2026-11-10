@@ -131,6 +131,7 @@ services:
       DSTACK_URL: https://dstack-edge
       DSTACK_ADMIN_TOKEN: ${DSTACK_ADMIN_TOKEN:?set DSTACK_ADMIN_TOKEN in .env}
       DSTACK_CUSTOMER_TOKEN_MODE: ${DSTACK_CUSTOMER_TOKEN_MODE:-admin_refresh}
+      PROVIDER_BACKENDS_FILE: /config/provider-backends.yml
       MIDTRANS_ENVIRONMENT: ${MIDTRANS_ENVIRONMENT:-sandbox}
       MIDTRANS_BASE_URL: ${MIDTRANS_BASE_URL:-}
       MIDTRANS_STATUS_URL: ${MIDTRANS_STATUS_URL:-}
@@ -146,6 +147,12 @@ services:
       SSL_CERT_FILE: /trust/ca-bundle.pem
     volumes:
       - trust:/trust:ro
+      - type: bind
+        source: ./provider-backends.yml
+        target: /config/provider-backends.yml
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       - "127.0.0.1:${BACKEND_HTTP_PORT:-8080}:8080"
     healthcheck:
