@@ -5,3 +5,11 @@ coverage/
 tmp/
 *.test
 provider-backends.yml
+
+deploy/.env
+deploy/*.pem
+deploy/*.key
+deploy/*.crt
+
+report.json
+go-mutesting-report.html

@@ -20,6 +20,8 @@ projects and restricts customer fleet and run plans to those configured provider
 the service after editing the file. The current billing path applies the shared verified
 rate to every configured provider, so provider-specific price differences are not represented.
 
+To run the backend with a self-hosted dstack server and PostgreSQL in Docker, use [`deploy/README.md`](deploy/README.md).
+
 The service applies pending migrations at startup. The backend is organized as a modular monolith around identity, tenancy, API keys, ledger, payments, compute, pricing, and dstack contexts. Each context owns its rules and persistence. HTTP handlers and server workers call context operations without issuing SQL. Cross-context operations pass the same transaction where one business action must update multiple contexts atomically. PostgreSQL adapters remain in the context packages, and `internal/store` owns connections, transaction query types, and migrations. The configured listener still needs a TLS-terminating reverse proxy.
 
 ## Bootstrap the provider account
@@ -39,7 +41,18 @@ go test ./...
 go vet ./...
 ```
 
-PostgreSQL integration tests run when `TEST_DATABASE_URL` points at an isolated test database. They migrate the database and create test records.
+PostgreSQL integration tests run when `TEST_DATABASE_URL` points at an isolated test database. They migrate the database and create test records. Run all database-backed packages serially.
+
+```sh
+TEST_DATABASE_URL='postgres://billing_test:secret@localhost:5432/billing_test?sslmode=verify-full' go test -p 1 ./internal/apikey ./internal/compute ./internal/store
+```
+
+Install `go-mutesting` and `jq`, then run mutation tests for signup, login, rate limiting, and API-key behavior. Arithmetic mutations are disabled because this mutator emits invalid Go for those expressions in the module. The command fails when a mutant survives or cannot be executed. It writes `report.json` and `go-mutesting-report.html` in the repository root.
+
+```sh
+go install github.com/avito-tech/go-mutesting/cmd/go-mutesting@latest
+TEST_DATABASE_URL='postgres://billing_test:secret@localhost:5432/billing_test?sslmode=verify-full' ./scripts/mutation-test.sh
+```
 
 ## Billing limitation
 

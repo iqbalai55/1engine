@@ -1,0 +1,9 @@
+{
+	admin localhost:2019
+	auto_https disable_redirects
+}
+
+https://:443 {
+	tls /certs/tls.crt /certs/tls.key
+	reverse_proxy dstack:3000
+}
