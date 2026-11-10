@@ -63,10 +63,8 @@ type InstanceUsageSnapshot struct {
 }
 
 type InstancePrice struct {
-	HourlyUSDNano domain.USDNano
-	RateUnit      RateUnit
-	Verified      bool
-	Version       string
+	Verified bool
+	Version  string
 }
 
 func BuildInstanceUsageEvidence(tenant domain.TenantID, snapshot InstanceUsageSnapshot, price InstancePrice, now time.Time, previouslyRecordedThrough *time.Time) (UsageEvidence, bool) {
@@ -106,10 +104,10 @@ func BuildInstanceUsageEvidence(tenant domain.TenantID, snapshot InstanceUsageSn
 		return UsageEvidence{}, false
 	}
 
-	verified := snapshot.GPUCountKnown && snapshot.GPUCount > 0 && snapshot.PriceBasis == RateInstanceHour && snapshot.PriceUSDNano != nil && price.Verified && price.Version != "" && price.RateUnit == RateInstanceHour && price.HourlyUSDNano > 0 && *snapshot.PriceUSDNano == price.HourlyUSDNano
+	verified := snapshot.PriceBasis == RateInstanceHour && snapshot.PriceUSDNano != nil && *snapshot.PriceUSDNano > 0 && price.Verified && price.Version != ""
 	rate, unit := domain.USDNano(0), RateUnpriced
 	if verified {
-		rate, unit = price.HourlyUSDNano, RateInstanceHour
+		rate, unit = *snapshot.PriceUSDNano, RateInstanceHour
 	}
 	provenance := map[string]any{
 		"source":               "dstack_instance",

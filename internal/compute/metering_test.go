@@ -67,7 +67,7 @@ func TestReconcileUsageIntervalDoesNotDoubleCountOverlap(t *testing.T) {
 func TestBuildInstanceUsageEvidenceUsesStableMinuteBoundaries(t *testing.T) {
 	start := time.Date(2026, 1, 1, 0, 0, 23, 0, time.UTC)
 	now := time.Date(2026, 1, 1, 0, 2, 48, 0, time.UTC)
-	rate := InstancePrice{HourlyUSDNano: 100_000_000, RateUnit: RateInstanceHour, Verified: true, Version: "verified-v1"}
+	rate := InstancePrice{Verified: true, Version: "verified-v1"}
 	rateValue := domain.USDNano(100_000_000)
 	snapshot := InstanceUsageSnapshot{ID: "instance-1", Created: start, GPUCount: 2, GPUCountKnown: true, PriceBasis: RateInstanceHour, PriceUSDNano: &rateValue, SourceVersion: "observation-v1"}
 
@@ -109,11 +109,11 @@ func TestBuildInstanceUsageEvidenceUsesStableMinuteBoundaries(t *testing.T) {
 	}
 }
 
-func TestBuildInstanceUsageEvidenceFailsClosedForUnverifiedOrMismatchedPrice(t *testing.T) {
+func TestBuildInstanceUsageEvidenceChargesReportedInstancePrice(t *testing.T) {
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rateValue := domain.USDNano(100_000_000)
 	snapshot := InstanceUsageSnapshot{ID: "instance-1", Created: start, GPUCount: 1, GPUCountKnown: true, PriceBasis: RateInstanceHour, PriceUSDNano: &rateValue, SourceVersion: "observation-v1"}
-	rate := InstancePrice{HourlyUSDNano: 100_000_000, RateUnit: RateInstanceHour, Verified: false, Version: "unverified-v1"}
+	rate := InstancePrice{Verified: false, Version: "unverified-v1"}
 	now := start.Add(2 * time.Minute)
 
 	evidence, ok := BuildInstanceUsageEvidence("tenant-1", snapshot, rate, now, nil)
@@ -125,8 +125,8 @@ func TestBuildInstanceUsageEvidenceFailsClosedForUnverifiedOrMismatchedPrice(t *
 	otherRate := domain.USDNano(200_000_000)
 	snapshot.PriceUSDNano = &otherRate
 	evidence, ok = BuildInstanceUsageEvidence("tenant-1", snapshot, rate, now, nil)
-	if !ok || evidence.PriceVerified || evidence.RateUnit != RateUnpriced || evidence.Rate != 0 {
-		t.Fatalf("mismatched price evidence = %+v, %v", evidence, ok)
+	if !ok || !evidence.PriceVerified || evidence.RateUnit != RateInstanceHour || evidence.Rate != otherRate {
+		t.Fatalf("reported instance price evidence = %+v, %v", evidence, ok)
 	}
 
 	snapshot.PriceUSDNano = nil
@@ -144,14 +144,27 @@ func TestBuildInstanceUsageEvidenceFailsClosedForUnverifiedOrMismatchedPrice(t *
 	}
 }
 
-func TestDecodeInstanceUsageSnapshotDoesNotAssumePriceUnit(t *testing.T) {
+func TestDecodeInstanceUsageSnapshotReadsPerInstancePrice(t *testing.T) {
 	payload := []byte(`{"created":"2026-01-01T00:00:00Z","finished_at":null,"price":0.1,"instance_type":{"resources":{"gpus":[{},{}]}}}`)
 	snapshot, err := decodeInstanceUsageSnapshot("instance-1", "observation-v1", payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.ID != "instance-1" || snapshot.Created.IsZero() || !snapshot.GPUCountKnown || snapshot.GPUCount != 2 || snapshot.PriceUSDNano != nil || snapshot.PriceRaw != "0.1" {
+	if snapshot.ID != "instance-1" || snapshot.Created.IsZero() || !snapshot.GPUCountKnown || snapshot.GPUCount != 2 || snapshot.PriceRaw != "0.1" {
 		t.Fatalf("decoded instance snapshot = %+v", snapshot)
+	}
+	if snapshot.PriceUSDNano == nil || *snapshot.PriceUSDNano != 100_000_000 || snapshot.PriceBasis != RateInstanceHour {
+		t.Fatalf("decoded instance price = %v basis %q", snapshot.PriceUSDNano, snapshot.PriceBasis)
+	}
+	for _, raw := range []string{`null`, `0`, `"abc"`} {
+		payload := []byte(`{"created":"2026-01-01T00:00:00Z","price":` + raw + `}`)
+		snapshot, err := decodeInstanceUsageSnapshot("instance-1", "observation-v1", payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.PriceUSDNano != nil || snapshot.PriceBasis != "" {
+			t.Fatalf("price %s was accepted as %v basis %q", raw, snapshot.PriceUSDNano, snapshot.PriceBasis)
+		}
 	}
 }
 

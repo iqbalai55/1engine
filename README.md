@@ -4,7 +4,7 @@
 
 The service manages customer accounts, provider integrations, GPU usage records, configurable pricing, prepaid credits, and payments. It uses Go 1.22, Gin, and PostgreSQL.
 
-The current release includes dstack integration. Beta9 is a planned provider integration. GPU usage intervals are recorded, but customer charges stay disabled until the deployed dstack version's instance price unit and basis are verified.
+The current release includes dstack integration. Beta9 is a planned provider integration. GPU usage intervals are recorded, but customer charges stay disabled until the deployed dstack version's instance price is verified on a live instance.
 
 ## Run the service
 
@@ -12,13 +12,13 @@ The current release includes dstack integration. Beta9 is a planned provider int
 2. Configure PostgreSQL with TLS and a database role that can create the extension and schema objects in the migration.
 3. Confirm that the installed dstack release supports `POST /api/users/refresh_token` and returns `creds.token` to an admin. Token refresh uses the dstack admin credential only on the dstack admin API. Customer requests use the returned tenant token.
 4. Set `DSTACK_CUSTOMER_TOKEN_MODE=admin_refresh`. Provisioning fails closed if the installed dstack does not support this operation.
-5. Run `go run ./cmd/server` from `backend/`.
+5. Run `go run ./cmd/server` from the repository root.
 
 Set `PROVIDER_BACKENDS_FILE` to a read-only YAML file with one or more dstack backend
 definitions for `aws`, `gcp`, `nebius`, or `runpod`. The backend applies them to tenant
 projects and restricts customer fleet and run plans to those configured providers. Restart
-the service after editing the file. The current billing path applies the shared verified
-rate to every configured provider, so provider-specific price differences are not represented.
+the service after editing the file. Each instance is charged the USD-per-hour price that dstack
+reports for that instance, as dstack does, so provider and instance-type prices are not shared.
 
 To run the backend with a self-hosted dstack server and PostgreSQL in Docker, use [`deploy/README.md`](deploy/README.md).
 
@@ -56,7 +56,7 @@ TEST_DATABASE_URL='postgres://billing_test:secret@localhost:5432/billing_test?ss
 
 ## Billing limitation
 
-The dstack observation worker records instance runtime intervals. It does not charge intervals until the installed dstack release's instance price unit and basis are verified. The dstack metrics documentation defines `dstack_instance_price_dollars_per_hour` as the instance price in USD per hour, which is one price for the whole instance regardless of GPU count. The published instance schema does not state this. Keep customer compute blocked until one live instance confirms that its reported price matches the provider's console price for the same instance type, and until the provider configures a verified USD-per-hour rate that matches it.
+The dstack observation worker records instance runtime intervals and charges each interval at the instance's reported price. The dstack metrics documentation defines `dstack_instance_price_dollars_per_hour` as the instance price in USD per hour, which is one price for the whole instance regardless of GPU count. The published instance schema does not state this. Keep customer charges blocked until one live instance confirms that its reported price matches the provider's console price for the same instance type. Then the provider marks the price verified with `PUT /v1/provider/price`, and charges start. Reservations at admission still use the verified rate from that endpoint.
 
 ## Main routes
 

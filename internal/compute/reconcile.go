@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
+	"strings"
 	"time"
 
 	"billing-backend/internal/domain"
@@ -167,7 +169,7 @@ func (r *Reconciler) meterPersistedInstances(ctx context.Context, tenant domain.
 			if priceErr != nil && !errors.Is(priceErr, pgx.ErrNoRows) {
 				return priceErr
 			}
-			price = InstancePrice{HourlyUSDNano: snapshot.HourlyUSD, RateUnit: RateUnit(snapshot.RateUnit), Verified: snapshot.Verified, Version: snapshot.Version}
+			price = InstancePrice{Verified: snapshot.Verified, Version: snapshot.Version}
 		}
 		evidence, ok := BuildInstanceUsageEvidence(tenant, snapshot, price, now, previous)
 		if !ok {
@@ -178,6 +180,24 @@ func (r *Reconciler) meterPersistedInstances(ctx context.Context, tenant domain.
 		}
 	}
 	return nil
+}
+
+// parseInstancePriceNano reads dstack's instance price, which is USD per hour for the whole instance.
+func parseInstancePriceNano(raw json.RawMessage) (domain.USDNano, bool) {
+	text := strings.Trim(string(raw), `"`)
+	if text == "" || text == "null" {
+		return 0, false
+	}
+	usd, ok := new(big.Rat).SetString(text)
+	if !ok || usd.Sign() <= 0 {
+		return 0, false
+	}
+	nano := new(big.Rat).Mul(usd, big.NewRat(1_000_000_000, 1))
+	rounded := new(big.Int).Quo(new(big.Int).Add(new(big.Int).Mul(nano.Num(), big.NewInt(2)), nano.Denom()), new(big.Int).Mul(nano.Denom(), big.NewInt(2)))
+	if !rounded.IsInt64() || rounded.Sign() <= 0 {
+		return 0, false
+	}
+	return domain.USDNano(rounded.Int64()), true
 }
 
 func decodeInstanceUsageSnapshot(id, sourceVersion string, payload []byte) (InstanceUsageSnapshot, error) {
@@ -198,6 +218,10 @@ func decodeInstanceUsageSnapshot(id, sourceVersion string, payload []byte) (Inst
 		return InstanceUsageSnapshot{}, errors.New("persisted dstack instance has no creation time")
 	}
 	snapshot := InstanceUsageSnapshot{ID: id, Created: wire.Created, FinishedAt: wire.FinishedAt, SourceVersion: sourceVersion, PriceRaw: string(wire.Price)}
+	if price, ok := parseInstancePriceNano(wire.Price); ok {
+		snapshot.PriceUSDNano = &price
+		snapshot.PriceBasis = RateInstanceHour
+	}
 	if wire.InstanceType != nil && wire.InstanceType.Resources != nil {
 		if len(wire.InstanceType.Resources.GPUs) == 0 || wire.InstanceType.Resources.GPUs[0] != '[' {
 			return snapshot, nil
