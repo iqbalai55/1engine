@@ -35,7 +35,18 @@ go test ./...
 go vet ./...
 ```
 
-PostgreSQL integration tests run when `TEST_DATABASE_URL` points at an isolated test database. They migrate the database and create test records.
+PostgreSQL integration tests run when `TEST_DATABASE_URL` points at an isolated test database. They migrate the database and create test records. Run all database-backed packages serially.
+
+```sh
+TEST_DATABASE_URL='postgres://billing_test:secret@localhost:5432/billing_test?sslmode=verify-full' go test -p 1 ./internal/apikey ./internal/compute ./internal/store
+```
+
+Install `go-mutesting` and `jq`, then run mutation tests for signup, login, rate limiting, and API-key behavior. Arithmetic mutations are disabled because this mutator emits invalid Go for those expressions in the module. The command fails when a mutant survives or cannot be executed. It writes `report.json` and `go-mutesting-report.html` in the repository root.
+
+```sh
+go install github.com/avito-tech/go-mutesting/cmd/go-mutesting@latest
+TEST_DATABASE_URL='postgres://billing_test:secret@localhost:5432/billing_test?sslmode=verify-full' ./scripts/mutation-test.sh
+```
 
 ## Billing limitation
 

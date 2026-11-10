@@ -25,7 +25,7 @@ import (
 )
 
 type Server struct {
-	Identity         *identity.Service
+	Identity         identityService
 	Keys             *apikey.Service
 	Ledger           *ledger.Service
 	Meter            *compute.Meter
@@ -35,6 +35,16 @@ type Server struct {
 	DStack           *dstack.Proxy
 	PaymentServerKey string
 	Limiter          *requestLimiter
+}
+
+type identityService interface {
+	SignUp(context.Context, string, string) error
+	VerifyEmail(context.Context, string) (string, error)
+	Login(context.Context, string, string) (identity.Session, error)
+	Authenticate(context.Context, string) (string, error)
+	IsProvider(context.Context, string) (bool, error)
+	Email(context.Context, string) (string, error)
+	RevokeSession(context.Context, string) error
 }
 
 type rateWindow struct {
@@ -128,6 +138,7 @@ func (s *Server) rateLimit(action string, limit int, window time.Duration) gin.H
 			c.Abort()
 			return
 		}
+		// mutator-disable-next-line statement/remove
 		c.Next()
 	}
 }

@@ -6,10 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"io"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type KeyID string
@@ -23,11 +24,25 @@ type Key struct {
 	CreatedAt string
 	RevokedAt *string
 }
-type Service struct{ DB *pgxpool.Pool }
+type database interface {
+	Begin(context.Context) (pgx.Tx, error)
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+type Service struct {
+	DB           database
+	randomSource io.Reader
+}
 
 func secret() (Plaintext, []byte, error) {
+	return secretFrom(rand.Reader)
+}
+
+func secretFrom(source io.Reader) (Plaintext, []byte, error) {
 	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
+	if _, err := io.ReadFull(source, b); err != nil {
 		return "", nil, err
 	}
 	value := "ik_" + base64.RawURLEncoding.EncodeToString(b)
@@ -40,7 +55,11 @@ func (s *Service) create(ctx context.Context, tenant TenantID, name string, tx p
 	if name == "" || len(name) > 100 {
 		return "", "", errors.New("key name must contain 1 to 100 characters")
 	}
-	plain, hash, err := secret()
+	source := s.randomSource
+	if source == nil {
+		source = rand.Reader
+	}
+	plain, hash, err := secretFrom(source)
 	if err != nil {
 		return "", "", err
 	}
