@@ -111,6 +111,7 @@ func (s *Server) Router() *gin.Engine {
 	portal := v1.Group("")
 	portal.Use(s.authenticate(false))
 	portal.GET("/me", s.me)
+	portal.POST("/offers", s.offers)
 	portal.GET("/me/credits", s.credits)
 	portal.GET("/me/usage", s.usage)
 	portal.GET("/me/purchases", s.purchaseList)
@@ -298,6 +299,40 @@ func (s *Server) me(c *gin.Context) {
 	}
 	c.JSON(200, gin.H{"user_id": p.UserID, "email": email, "tenant_id": p.TenantID, "tenant_state": t.State, "project": t.DStack.Project})
 }
+func (s *Server) offers(c *gin.Context) {
+	var req struct {
+		GPUCount    int     `json:"gpu_count"`
+		MinMemoryGB float64 `json:"min_memory_gb"`
+	}
+	if err := decode(c, &req); err != nil {
+		respondError(c, http.StatusBadRequest, errors.New("invalid request body"))
+		return
+	}
+	if req.GPUCount == 0 {
+		req.GPUCount = 1
+	}
+	p := mustPrincipal(c)
+	if p.TenantID == "" {
+		respondError(c, http.StatusForbidden, errors.New("provider account has no customer tenant"))
+		return
+	}
+	binding, err := s.Tenants.Get(c, p.TenantID)
+	if err != nil {
+		respondError(c, http.StatusForbidden, domain.ErrTenantUnavailable)
+		return
+	}
+	offers, err := s.DStack.Offers(c, p.TenantID, binding.DStack, req.GPUCount, req.MinMemoryGB)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, domain.ErrTenantUnavailable) {
+			status = http.StatusServiceUnavailable
+		}
+		respondError(c, status, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"offers": offers, "count": len(offers)})
+}
+
 func (s *Server) credits(c *gin.Context) {
 	p := mustPrincipal(c)
 	if p.TenantID == "" {
