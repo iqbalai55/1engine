@@ -126,8 +126,6 @@ func (s *Server) Router() *gin.Engine {
 	provider.GET("/price", s.getPrice)
 	provider.PUT("/price", s.setPrice)
 	v1.POST("/payments/midtrans/notification", s.notification)
-	proxy := v1.Group("/dstack", s.authenticate(true), s.rateLimitBy("proxy", 300, time.Minute, tenantKey))
-	proxy.Any("/*path", s.proxyDStack)
 	proxyAPI := v1.Group("/api", s.authenticate(true), s.rateLimitBy("proxy", 300, time.Minute, tenantKey))
 	proxyAPI.Any("/*path", s.proxyDStack)
 	return r
@@ -298,7 +296,7 @@ func (s *Server) me(c *gin.Context) {
 		respondError(c, 500, err)
 		return
 	}
-	c.JSON(200, gin.H{"user_id": p.UserID, "email": email, "tenant_id": p.TenantID, "tenant_state": t.State, "dstack_project": t.DStack.Project, "dstack_server": t.DStack.Server})
+	c.JSON(200, gin.H{"user_id": p.UserID, "email": email, "tenant_id": p.TenantID, "tenant_state": t.State, "project": t.DStack.Project})
 }
 func (s *Server) credits(c *gin.Context) {
 	p := mustPrincipal(c)
@@ -453,9 +451,6 @@ func (s *Server) proxyDStack(c *gin.Context) {
 		return
 	}
 	path := c.Param("path")
-	if strings.HasPrefix(c.Request.URL.Path, "/v1/dstack/") {
-		path = "/api" + path
-	}
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/api/") {
 		path = "/api" + path
 	}

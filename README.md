@@ -89,5 +89,5 @@ The dstack observation worker records instance runtime intervals and charges eac
 - `GET /v1/me`, `/v1/me/credits`, `/v1/me/usage`, and `/v1/me/purchases` read the signed-in tenant's data.
 - `POST /v1/api-keys`, `POST /v1/api-keys/{id}/rotate`, and `DELETE /v1/api-keys/{id}` manage customer keys.
 - `POST /v1/credit-purchases` creates a fixed-package Snap checkout. Credits are granted only after a verified settlement.
-- `/v1/dstack/*` and `/v1/api/*` proxy allowlisted dstack customer operations. Global and admin operations remain blocked.
+- `/v1/api/*` proxies allowlisted customer compute operations. Global and admin operations remain blocked.
 - `/v1/provider/*` requires the provider account bootstrapped by the CLI.

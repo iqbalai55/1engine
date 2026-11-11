@@ -76,6 +76,17 @@ func TestRouterHealthAndProtectedRoutes(t *testing.T) {
 	if protected.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated /v1/me status = %d, want 401", protected.Code)
 	}
+	// The compute proxy has one customer prefix. The old /v1/dstack alias is gone.
+	removed := httptest.NewRecorder()
+	router.ServeHTTP(removed, httptest.NewRequest(http.MethodPost, "/v1/dstack/runs/list", nil))
+	if removed.Code != http.StatusNotFound {
+		t.Fatalf("removed /v1/dstack prefix status = %d, want 404", removed.Code)
+	}
+	customerProxy := httptest.NewRecorder()
+	router.ServeHTTP(customerProxy, httptest.NewRequest(http.MethodPost, "/v1/api/runs/list", nil))
+	if customerProxy.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated /v1/api status = %d, want 401", customerProxy.Code)
+	}
 }
 
 func TestSignupRejectsMalformedOrUnknownRequestFields(t *testing.T) {

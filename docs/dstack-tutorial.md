@@ -9,7 +9,7 @@ you configured.
 
 ```mermaid
 flowchart LR
-  C[Customer with API key] -->|/v1/api/... or /v1/dstack/...| B[Go billing backend]
+  C[Customer with API key] -->|/v1/api/...| B[Go billing backend]
   B -->|tenant token over TLS| D[Self-hosted dstack]
   D --> P[AWS, GCP, Nebius, RunPod]
   F[provider-backends.yml] -->|read at startup| B
@@ -236,7 +236,7 @@ A customer does three things:
      -H "Content-Type: application/json" -d '{}'
    ```
 
-Requests under `/v1/api/` and `/v1/dstack/` are checked against an allowlist. Global and admin
+Requests under `/v1/api/` are checked against an allowlist. Global and admin
 operations are blocked. Fleet and run plans are restricted to your configured providers. A plan
 for a provider you did not configure is rejected.
 

@@ -136,15 +136,15 @@ func (p *Proxy) bindProviderBackends(raw []byte, path string, server Server) ([]
 	}
 	var body map[string]any
 	if err := json.Unmarshal(raw, &body); err != nil {
-		return nil, errors.New("dstack request body must be valid JSON")
+		return nil, errors.New("request body must be valid JSON")
 	}
 	spec := objectAt(body, route.accessors...)
 	if spec == nil {
-		return nil, errors.New("dstack fleet or run plan is missing its specification")
+		return nil, errors.New("plan is missing its specification")
 	}
 	configuration, ok := spec["configuration"].(map[string]any)
 	if !ok {
-		return nil, errors.New("dstack plan is missing its configuration")
+		return nil, errors.New("plan is missing its configuration")
 	}
 	if route.configuration {
 		if sshConfig, exists := configuration["ssh_config"]; exists && sshConfig != nil {
@@ -169,7 +169,7 @@ func (p *Proxy) bindProviderBackends(raw []byte, path string, server Server) ([]
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
-		return nil, errors.New("dstack request body could not be encoded")
+		return nil, errors.New("request body could not be encoded")
 	}
 	return encoded, nil
 }
@@ -192,7 +192,7 @@ func configuredBackendSelection(spec map[string]any, allowed ProviderBackends) (
 	}
 	requested, ok := raw.([]any)
 	if !ok || len(requested) == 0 {
-		return nil, true, errors.New("dstack backends must be a non-empty list of backend types")
+		return nil, true, errors.New("backends must be a non-empty list of provider names")
 	}
 	selected := make([]string, 0, len(requested))
 	for _, value := range requested {
@@ -201,7 +201,7 @@ func configuredBackendSelection(spec map[string]any, allowed ProviderBackends) (
 			return nil, true, errors.New("fleet or run selects a backend that is not enabled")
 		}
 		if slices.Contains(selected, backendType) {
-			return nil, true, errors.New("dstack backend selection contains duplicates")
+			return nil, true, errors.New("backend selection contains duplicates")
 		}
 		selected = append(selected, backendType)
 	}
@@ -253,32 +253,32 @@ func setConfiguredBackendSelection(spec map[string]any, types []string) {
 
 func (p *Proxy) classify(method, path, project string, server Server) (OperationKind, error) {
 	if server.Mode == ModeSharedProject && strings.HasPrefix(path, "/api/users/public_keys/") {
-		return "", errors.New("dstack account SSH keys are shared on this deployment and cannot be changed by a tenant")
+		return "", errors.New("SSH keys belong to the account and cannot be changed here")
 	}
 	for _, policy := range p.Policies {
 		if method == policy.Method && policy.Pattern.MatchString(path) {
 			if projectPath(path) {
 				parts := strings.Split(path, "/")
 				if len(parts) <= 3 || parts[3] == "" {
-					return "", errors.New("invalid dstack project path")
+					return "", errors.New("invalid project path")
 				}
 				if parts[3] != project || (parts[2] == "projects" && (len(parts) != 5 || parts[4] != "get")) {
-					return "", errors.New("customer request cannot select another dstack project")
+					return "", errors.New("request cannot select another project")
 				}
 			}
 			return policy.Kind, nil
 		}
 	}
-	return "", errors.New("dstack route is not allowed")
+	return "", errors.New("operation is not allowed")
 }
 
 func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding domain.DStackBinding, op Operation) (SafeResponse, error) {
 	if !strings.HasPrefix(op.Path, "/") || strings.HasPrefix(op.Path, "//") || strings.Contains(op.Path, "?") || strings.Contains(op.Path, "#") || strings.Contains(op.Path, "\\") || strings.Contains(strings.ToLower(op.Path), "%2f") || strings.Contains(strings.ToLower(op.Path), "%5c") {
-		return SafeResponse{}, errors.New("dstack route path is invalid")
+		return SafeResponse{}, errors.New("request path is invalid")
 	}
 	for _, segment := range strings.Split(op.Path, "/") {
 		if segment == "." || segment == ".." {
-			return SafeResponse{}, errors.New("dstack route path is invalid")
+			return SafeResponse{}, errors.New("request path is invalid")
 		}
 	}
 	server, ok := p.Servers.Get(binding.Server)
@@ -296,10 +296,10 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 	if projectPath(path) {
 		parts := strings.Split(path, "/")
 		if len(parts) < 4 || parts[3] == "" {
-			return SafeResponse{}, errors.New("invalid dstack project path")
+			return SafeResponse{}, errors.New("invalid project path")
 		}
 		if parts[3] != string(binding.Project) {
-			return SafeResponse{}, errors.New("customer request cannot select another dstack project")
+			return SafeResponse{}, errors.New("request cannot select another project")
 		}
 		parts[3] = url.PathEscape(parts[3])
 		path = strings.Join(parts, "/")
@@ -307,23 +307,23 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 	if strings.HasPrefix(path, "/proxy/") {
 		parts := strings.Split(path, "/")
 		if len(parts) < 5 || parts[3] != string(binding.Project) {
-			return SafeResponse{}, errors.New("customer request cannot select another dstack project")
+			return SafeResponse{}, errors.New("request cannot select another project")
 		}
 		parts[3] = url.PathEscape(parts[3])
 		path = strings.Join(parts, "/")
 	}
 	if len(op.Query) > 0 {
-		return SafeResponse{}, errors.New("dstack customer operations do not accept URL query parameters")
+		return SafeResponse{}, errors.New("query parameters are not supported")
 	}
 	if kind == OperationStart && strings.TrimSpace(op.IdempotencyKey) == "" {
 		return SafeResponse{}, errors.New("compute start requires an Idempotency-Key")
 	}
 	if _, isPlan := backendPlanForPath(op.Path); isPlan {
 		if len(op.Body) == 0 || !strings.Contains(strings.ToLower(op.Headers.Get("Content-Type")), "json") {
-			return SafeResponse{}, errors.New("dstack fleet and run plans require a JSON body")
+			return SafeResponse{}, errors.New("fleet and run plans require a JSON body")
 		}
 		if !json.Valid(op.Body) {
-			return SafeResponse{}, errors.New("dstack request body must be valid JSON")
+			return SafeResponse{}, errors.New("request body must be valid JSON")
 		}
 		op.Body, err = p.bindProviderBackends(op.Body, op.Path, server)
 		if err != nil {
@@ -335,7 +335,7 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 	}
 	base, parseErr := url.Parse(server.URL)
 	if parseErr != nil || base.Scheme != "https" || base.Host == "" || base.User != nil {
-		return SafeResponse{}, errors.New("dstack endpoint must be an absolute HTTPS URL")
+		return SafeResponse{}, errors.New("compute endpoint is misconfigured")
 	}
 	credential, err := p.Credentials.CustomerCredential(ctx, tenant, server.Name, p.EncryptionKey)
 	if err != nil || credential == "" {
@@ -345,20 +345,20 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 		if strings.Contains(strings.ToLower(op.Headers.Get("Content-Type")), "json") {
 			op.Body, err = bindProject(op.Body, op.Path, string(binding.Project), binding.ProjectID, dstackAccountUsername(binding))
 		} else {
-			return SafeResponse{}, errors.New("dstack proxy accepts JSON request bodies only")
+			return SafeResponse{}, errors.New("request bodies must be JSON")
 		}
 		if err != nil {
 			return SafeResponse{}, err
 		}
 	}
 	if len(op.Body) == 0 && op.Method == http.MethodPost {
-		return SafeResponse{}, errors.New("dstack customer operation requires a JSON request body")
+		return SafeResponse{}, errors.New("request body is required")
 	}
 	if len(op.Body) > 0 && !strings.Contains(strings.ToLower(op.Headers.Get("Content-Type")), "json") {
-		return SafeResponse{}, errors.New("dstack proxy accepts JSON request bodies only")
+		return SafeResponse{}, errors.New("request bodies must be JSON")
 	}
 	if len(op.Query) > 0 {
-		return SafeResponse{}, errors.New("dstack customer operations do not accept URL query parameters")
+		return SafeResponse{}, errors.New("query parameters are not supported")
 	}
 	reservationKey := ""
 	if kind == OperationStart {
@@ -370,7 +370,7 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 			return SafeResponse{}, domain.ErrPriceUnverified
 		}
 		if len(op.Body) == 0 || !json.Valid(op.Body) {
-			return SafeResponse{}, errors.New("dstack request body must be valid JSON")
+			return SafeResponse{}, errors.New("request body must be valid JSON")
 		}
 		identity := strings.Join([]string{op.Method, op.Path, op.Query.Encode(), string(op.Body)}, "\n")
 		hash := sha256.Sum256([]byte(identity))
@@ -387,7 +387,7 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 		return SafeResponse{}, err
 	}
 	if endpoint.Scheme != "https" || endpoint.Host == "" {
-		return SafeResponse{}, errors.New("dstack endpoint must use HTTPS")
+		return SafeResponse{}, errors.New("compute endpoint is misconfigured")
 	}
 	endpoint.RawQuery = op.Query.Encode()
 	request, err := http.NewRequestWithContext(ctx, op.Method, endpoint.String(), bytes.NewReader(op.Body))
@@ -461,17 +461,17 @@ func dstackAccountUsername(binding domain.DStackBinding) string {
 func bindProject(raw []byte, path, project, projectID, username string) ([]byte, error) {
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return nil, errors.New("dstack request body must be valid JSON")
+		return nil, errors.New("request body must be valid JSON")
 	}
 	object, ok := value.(map[string]any)
 	if !ok {
-		return nil, errors.New("dstack request body must be a JSON object")
+		return nil, errors.New("request body must be a JSON object")
 	}
 	set := func(key, expected string) error {
 		if supplied, exists := object[key]; exists {
 			name, ok := supplied.(string)
 			if !ok || (name != "" && name != expected) {
-				return errors.New("customer request cannot select another dstack tenant")
+				return errors.New("request cannot select another tenant")
 			}
 		}
 		object[key] = expected
@@ -486,11 +486,11 @@ func bindProject(raw []byte, path, project, projectID, username string) ([]byte,
 		if rawProjects, exists := object["project_names"]; exists {
 			projects, ok := rawProjects.([]any)
 			if !ok {
-				return nil, errors.New("customer request cannot select another dstack project")
+				return nil, errors.New("request cannot select another project")
 			}
 			for _, value := range projects {
 				if name, ok := value.(string); !ok || name != project {
-					return nil, errors.New("customer request cannot select another dstack project")
+					return nil, errors.New("request cannot select another project")
 				}
 			}
 		}
@@ -500,16 +500,16 @@ func bindProject(raw []byte, path, project, projectID, username string) ([]byte,
 		}
 	case path == "/api/events/list":
 		if projectID == "" {
-			return nil, errors.New("dstack project ID is required to scope events")
+			return nil, errors.New("project ID is required to read events")
 		}
 		if rawProjects, exists := object["within_projects"]; exists {
 			projects, ok := rawProjects.([]any)
 			if !ok {
-				return nil, errors.New("customer request cannot select another dstack project")
+				return nil, errors.New("request cannot select another project")
 			}
 			for _, value := range projects {
 				if id, ok := value.(string); !ok || id != projectID {
-					return nil, errors.New("customer request cannot select another dstack project")
+					return nil, errors.New("request cannot select another project")
 				}
 			}
 		}
@@ -530,14 +530,14 @@ func bindProject(raw []byte, path, project, projectID, username string) ([]byte,
 		}
 	case strings.HasSuffix(path, "/runs/apply"):
 		if _, exists := object["plan"]; !exists {
-			return nil, errors.New("dstack run apply requires a plan")
+			return nil, errors.New("run apply requires a plan")
 		}
 		if err := bindNestedTenantReferences(object["plan"], project, username); err != nil {
 			return nil, err
 		}
 		force, ok := object["force"].(bool)
 		if !ok || force {
-			return nil, errors.New("dstack run apply must provide force=false")
+			return nil, errors.New("run apply must provide force=false")
 		}
 	default:
 		for _, key := range []string{"project_name", "project"} {
@@ -564,14 +564,14 @@ func bindNestedTenantReferences(node any, project, username string) error {
 			if lower == "project" || lower == "project_name" {
 				name, ok := child.(string)
 				if !ok || (name != "" && name != project) {
-					return errors.New("customer request cannot select another dstack project")
+					return errors.New("request cannot select another project")
 				}
 				value[key] = project
 			}
 			if lower == "user" || lower == "username" {
 				name, ok := child.(string)
 				if !ok || (name != "" && name != username) {
-					return errors.New("customer request cannot select another dstack user")
+					return errors.New("request cannot select another user")
 				}
 				value[key] = username
 			}
