@@ -98,8 +98,14 @@ func (s *Service) SetProjectID(ctx context.Context, id domain.TenantID, projectI
 }
 
 func (s *Service) SetAccountUsername(ctx context.Context, id domain.TenantID, username string) error {
-	_, err := s.DB.Exec(ctx, `UPDATE tenants SET dstack_account_username=$2 WHERE id=$1 AND (dstack_account_username IS NULL OR dstack_account_username=$2)`, string(id), username)
-	return err
+	tag, err := s.DB.Exec(ctx, `UPDATE tenants SET dstack_account_username=$2 WHERE id=$1 AND (dstack_account_username IS NULL OR dstack_account_username=$2)`, string(id), username)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("tenant already belongs to another dstack account")
+	}
+	return nil
 }
 
 func (s *Service) MarkProvisionFailed(ctx context.Context, id domain.TenantID) error {
