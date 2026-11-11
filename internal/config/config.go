@@ -30,6 +30,7 @@ type Config struct {
 	SMTPUser             string
 	SMTPPassword         string
 	SMTPFrom             string
+	EmailDelivery        string
 	VerifyTLS            bool
 }
 
@@ -53,6 +54,7 @@ func Load() (Config, error) {
 		SMTPUser:             os.Getenv("SMTP_USER"),
 		SMTPPassword:         os.Getenv("SMTP_PASSWORD"),
 		SMTPFrom:             os.Getenv("SMTP_FROM"),
+		EmailDelivery:        os.Getenv("EMAIL_DELIVERY"),
 	}
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = ":8080"
@@ -73,17 +75,29 @@ func Load() (Config, error) {
 		}
 		cfg.TrustedProxyCIDRs = append(cfg.TrustedProxyCIDRs, cidr)
 	}
-	if cfg.VerifyTLS, _ = strconv.ParseBool(os.Getenv("SMTP_VERIFY_TLS")); !cfg.VerifyTLS {
-		return Config{}, errors.New("SMTP_VERIFY_TLS must be true")
+	if cfg.EmailDelivery == "" {
+		cfg.EmailDelivery = "smtp"
 	}
-	port := os.Getenv("SMTP_PORT")
-	if port == "" {
-		return Config{}, errors.New("SMTP_PORT is required")
-	}
-	var err error
-	cfg.SMTPPort, err = strconv.Atoi(port)
-	if err != nil || cfg.SMTPPort < 1 || cfg.SMTPPort > 65535 {
-		return Config{}, errors.New("SMTP_PORT must be a valid port")
+	switch cfg.EmailDelivery {
+	case "smtp":
+		if cfg.VerifyTLS, _ = strconv.ParseBool(os.Getenv("SMTP_VERIFY_TLS")); !cfg.VerifyTLS {
+			return Config{}, errors.New("SMTP_VERIFY_TLS must be true")
+		}
+		port := os.Getenv("SMTP_PORT")
+		if port == "" {
+			return Config{}, errors.New("SMTP_PORT is required")
+		}
+		var err error
+		cfg.SMTPPort, err = strconv.Atoi(port)
+		if err != nil || cfg.SMTPPort < 1 || cfg.SMTPPort > 65535 {
+			return Config{}, errors.New("SMTP_PORT must be a valid port")
+		}
+		if cfg.SMTPPort != 465 {
+			return Config{}, errors.New("SMTP_PORT must use implicit TLS on port 465")
+		}
+	case "log":
+	default:
+		return Config{}, errors.New("EMAIL_DELIVERY must be smtp or log")
 	}
 	checks := map[string]string{
 		"DATABASE_URL":          cfg.DatabaseURL,
@@ -94,10 +108,12 @@ func Load() (Config, error) {
 		"MIDTRANS_SERVER_KEY":   cfg.MidtransServerKey,
 		"MIDTRANS_CLIENT_KEY":   cfg.MidtransClientKey,
 		"PUBLIC_BASE_URL":       cfg.PublicBaseURL,
-		"SMTP_HOST":             cfg.SMTPHost,
-		"SMTP_USER":             cfg.SMTPUser,
-		"SMTP_PASSWORD":         cfg.SMTPPassword,
-		"SMTP_FROM":             cfg.SMTPFrom,
+	}
+	if cfg.EmailDelivery == "smtp" {
+		checks["SMTP_HOST"] = cfg.SMTPHost
+		checks["SMTP_USER"] = cfg.SMTPUser
+		checks["SMTP_PASSWORD"] = cfg.SMTPPassword
+		checks["SMTP_FROM"] = cfg.SMTPFrom
 	}
 	for name, value := range checks {
 		if value == "" {
@@ -134,7 +150,7 @@ func Load() (Config, error) {
 			return Config{}, errors.New(name + " must be an HTTPS URL")
 		}
 	}
-	if cfg.SMTPPort != 465 {
+	if cfg.SMTPPort != 0 && cfg.SMTPPort != 465 {
 		return Config{}, errors.New("SMTP_PORT must use implicit TLS on port 465")
 	}
 	if len(cfg.EncryptionKey) != 32 {

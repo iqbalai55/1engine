@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/smtp"
 	"net/url"
@@ -25,6 +26,22 @@ import (
 type Mailer interface {
 	SendVerification(ctx context.Context, email, token string) error
 }
+
+// LogMailer writes the verification link to the service log instead of sending it.
+// Use it for development only: anyone who can read the logs can verify an address.
+type LogMailer struct{ PublicBaseURL string }
+
+func (m LogMailer) SendVerification(ctx context.Context, email, token string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	link := strings.TrimRight(m.PublicBaseURL, "/") + "/verify-email?token=" + url.QueryEscape(token)
+	log.Printf("verification link for %s: %s", email, link)
+	return nil
+}
+
 type SMTPMailer struct {
 	Host          string
 	Port          string

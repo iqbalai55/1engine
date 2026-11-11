@@ -14,6 +14,7 @@ var loadEnvNames = []string{
 	"DSTACK_CUSTOMER_TOKEN_MODE",
 	"DSTACK_ENCRYPTION_KEY",
 	"DSTACK_URL",
+	"EMAIL_DELIVERY",
 	"LISTEN_ADDR",
 	"MIDTRANS_BASE_URL",
 	"MIDTRANS_CLIENT_KEY",
@@ -40,6 +41,7 @@ func baseEnv() map[string]string {
 		"DSTACK_CUSTOMER_TOKEN_MODE": "admin_refresh",
 		"DSTACK_ENCRYPTION_KEY":      strings.Repeat("k", 32),
 		"DSTACK_URL":                 "https://dstack.internal",
+		"EMAIL_DELIVERY":             "smtp",
 		"LISTEN_ADDR":                "",
 		"MIDTRANS_BASE_URL":          "",
 		"MIDTRANS_CLIENT_KEY":        "midtrans-client-key",
@@ -101,6 +103,23 @@ func TestLoadAcceptsCompleteEnvironment(t *testing.T) {
 			check: func(t *testing.T, cfg Config) {
 				if len(cfg.TrustedProxyCIDRs) != 2 || cfg.TrustedProxyCIDRs[0] != "10.0.0.0/8" || cfg.TrustedProxyCIDRs[1] != "192.0.2.1/32" {
 					t.Fatalf("TrustedProxyCIDRs = %v, want both ranges", cfg.TrustedProxyCIDRs)
+				}
+			},
+		},
+		{
+			name: "log email delivery needs no smtp settings",
+			overrides: map[string]string{
+				"EMAIL_DELIVERY":  "log",
+				"SMTP_HOST":       "",
+				"SMTP_USER":       "",
+				"SMTP_PASSWORD":   "",
+				"SMTP_FROM":       "",
+				"SMTP_PORT":       "",
+				"SMTP_VERIFY_TLS": "",
+			},
+			check: func(t *testing.T, cfg Config) {
+				if cfg.EmailDelivery != "log" || cfg.SMTPPort != 0 {
+					t.Fatalf("EmailDelivery = %q, SMTPPort = %d, want log and 0", cfg.EmailDelivery, cfg.SMTPPort)
 				}
 			},
 		},
@@ -233,6 +252,16 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 			name:      "trusted proxies must be CIDR ranges",
 			overrides: map[string]string{"TRUSTED_PROXY_CIDRS": "10.0.0.1"},
 			wantError: "TRUSTED_PROXY_CIDRS must contain only CIDR ranges",
+		},
+		{
+			name:      "email delivery must be a supported mode",
+			overrides: map[string]string{"EMAIL_DELIVERY": "oauth"},
+			wantError: "EMAIL_DELIVERY must be smtp or log",
+		},
+		{
+			name:      "smtp mode still requires a mail host",
+			overrides: map[string]string{"SMTP_HOST": ""},
+			wantError: "SMTP_HOST is required",
 		},
 		{
 			name:      "smtp tls verification must be enabled",

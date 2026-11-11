@@ -40,7 +40,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	mailer := identity.SMTPMailer{Host: cfg.SMTPHost, Port: os.Getenv("SMTP_PORT"), Username: cfg.SMTPUser, Password: cfg.SMTPPassword, From: cfg.SMTPFrom, PublicBaseURL: cfg.PublicBaseURL}
+	var mailer identity.Mailer = identity.SMTPMailer{Host: cfg.SMTPHost, Port: os.Getenv("SMTP_PORT"), Username: cfg.SMTPUser, Password: cfg.SMTPPassword, From: cfg.SMTPFrom, PublicBaseURL: cfg.PublicBaseURL}
+	if cfg.EmailDelivery == "log" {
+		mailer = identity.LogMailer{PublicBaseURL: cfg.PublicBaseURL}
+	}
 	keyService := &apikey.Service{DB: db.Pool}
 	tenantService := &tenant.Service{DB: db.Pool}
 	priceService := &pricing.Service{DB: db.Pool}

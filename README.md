@@ -8,7 +8,7 @@ The current release includes dstack integration. Beta9 is a planned provider int
 
 ## Run the service
 
-1. Copy `.env.example` into the deployment secret store and replace every sample value. Use SMTP implicit TLS on port 465.
+1. Copy `.env.example` into the deployment secret store and replace every sample value. `EMAIL_DELIVERY=smtp` uses SMTP implicit TLS on port 465. `EMAIL_DELIVERY=log` writes verification links to the service log instead, for development only, and then no SMTP settings are needed.
 2. Configure PostgreSQL with TLS and a database role that can create the extension and schema objects in the migration.
 3. Confirm that the installed dstack release supports `POST /api/users/refresh_token` and returns `creds.token` to an admin. Token refresh uses the dstack admin credential only on the dstack admin API. Customer requests use the returned tenant token.
 4. Set `DSTACK_CUSTOMER_TOKEN_MODE=admin_refresh`. Provisioning fails closed if the installed dstack does not support this operation.
