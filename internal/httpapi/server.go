@@ -103,8 +103,8 @@ func (s *Server) Router() *gin.Engine {
 	}
 	r.Use(gin.Recovery())
 	v1 := r.Group("/v1")
-	v1.GET("/auth/google/start", s.rateLimit("google-start", 30, time.Hour), s.googleStart)
-	v1.POST("/auth/google/callback", s.rateLimit("google-callback", 30, time.Hour), s.googleCallback)
+	v1.GET("/auth/google/start", s.rateLimit("google-start", 60, time.Minute), s.googleStart)
+	v1.POST("/auth/google/callback", s.rateLimit("google-callback", 30, time.Minute), s.googleCallback)
 	v1.POST("/logout", s.logout)
 	v1.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 	portal := v1.Group("")

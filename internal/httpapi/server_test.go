@@ -286,8 +286,8 @@ func TestGoogleCallbackRejectsFailedExchange(t *testing.T) {
 
 func TestGoogleStartRateLimitRejectsExcessRequests(t *testing.T) {
 	limiter := newRequestLimiter()
-	for range 30 {
-		if !limiter.Allow("google-start:192.0.2.10", 30, time.Hour, time.Now()) {
+	for range 60 {
+		if !limiter.Allow("google-start:192.0.2.10", 60, time.Minute, time.Now()) {
 			t.Fatal("failed to prepare full google start quota")
 		}
 	}
@@ -303,15 +303,15 @@ func TestGoogleStartRateLimitRejectsExcessRequests(t *testing.T) {
 	if identity.startCalls != 0 {
 		t.Fatalf("rate-limited google start reached identity service %d times", identity.startCalls)
 	}
-	if recorder.Header().Get("Retry-After") != "3600" {
-		t.Fatalf("Retry-After = %q, want 3600", recorder.Header().Get("Retry-After"))
+	if recorder.Header().Get("Retry-After") != "60" {
+		t.Fatalf("Retry-After = %q, want 60", recorder.Header().Get("Retry-After"))
 	}
 }
 
 func TestGoogleStartRateLimitStopsAfterConfiguredRequests(t *testing.T) {
 	identity := &identityStub{}
 	router := (&Server{Identity: identity}).Router()
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 60; i++ {
 		request := httptest.NewRequest(http.MethodGet, "/v1/auth/google/start", nil)
 		request.RemoteAddr = "192.0.2.20:1234"
 		recorder := httptest.NewRecorder()
@@ -327,8 +327,8 @@ func TestGoogleStartRateLimitStopsAfterConfiguredRequests(t *testing.T) {
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("google start after the allowed quota status = %d, want 429", recorder.Code)
 	}
-	if identity.startCalls != 30 {
-		t.Fatalf("identity start calls = %d, want 30 calls before the rate limit", identity.startCalls)
+	if identity.startCalls != 60 {
+		t.Fatalf("identity start calls = %d, want 60 calls before the rate limit", identity.startCalls)
 	}
 }
 
@@ -336,7 +336,7 @@ func TestForwardedForIsIgnoredWithoutTrustedProxy(t *testing.T) {
 	identity := &identityStub{}
 	router := (&Server{Identity: identity}).Router()
 	statuses := []int{}
-	for i := 0; i < 31; i++ {
+	for i := 0; i < 61; i++ {
 		request := httptest.NewRequest(http.MethodGet, "/v1/auth/google/start", nil)
 		request.RemoteAddr = "203.0.113.9:1234"
 		request.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i+1))
@@ -344,15 +344,15 @@ func TestForwardedForIsIgnoredWithoutTrustedProxy(t *testing.T) {
 		router.ServeHTTP(recorder, request)
 		statuses = append(statuses, recorder.Code)
 	}
-	if statuses[30] != http.StatusTooManyRequests {
-		t.Fatalf("statuses with rotating X-Forwarded-For = %v, want the 31st sign-in limited", statuses)
+	if statuses[60] != http.StatusTooManyRequests {
+		t.Fatalf("statuses with rotating X-Forwarded-For = %v, want the 61st sign-in limited", statuses)
 	}
 }
 
 func TestForwardedForIsHonoredFromTrustedProxy(t *testing.T) {
 	identity := &identityStub{}
 	router := (&Server{Identity: identity, TrustedProxies: []string{"203.0.113.0/24"}}).Router()
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 60; i++ {
 		request := httptest.NewRequest(http.MethodGet, "/v1/auth/google/start", nil)
 		request.RemoteAddr = "203.0.113.9:1234"
 		request.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i+1))
