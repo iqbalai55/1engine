@@ -83,7 +83,7 @@ Keep these values in a password manager or your secret store. You paste them int
 ## 4. Write provider-backends.yml
 
 Create `deploy/provider-backends.yml`. Use one entry per provider. Each `type` may appear only
-once, and only `aws`, `gcp`, `nebius`, and `runpod` are accepted. Replace every placeholder:
+once, and only `aws`, `gcp`, `nebius`, `runpod`, and `vastai` are accepted. Replace every placeholder:
 
 ```yaml
 backends:
@@ -219,7 +219,7 @@ curl --cacert deploy/ca-bundle.pem -X POST \
   -H "Content-Type: application/json" -d '{}'
 ```
 
-Change `aws` to `gcp`, `nebius`, or `runpod` for the others. The response contains the stored
+Change `aws` to `gcp`, `nebius`, `runpod`, or `vastai` for the others. The response contains the stored
 config, including credentials, so do not paste it anywhere.
 
 ## 10. Give a customer access

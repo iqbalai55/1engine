@@ -14,6 +14,7 @@ func TestParseProviderBackendsAcceptsEachSupportedType(t *testing.T) {
 		{BackendGCP, "type: gcp\nproject_id: inference-project\ncreds:\n  type: service_account\n  data: '{\"private_key\":\"gcp-test-secret\"}'\n"},
 		{BackendNebius, "type: nebius\ncreds:\n  type: service_account\n  service_account_id: service-account-id\n  public_key_id: public-key-id\n  private_key_content: nebius-test-secret\n"},
 		{BackendRunPod, "type: runpod\ncreds:\n  type: api_key\n  api_key: runpod-test-secret\n"},
+		{BackendVastAI, "type: vastai\ncreds:\n  type: api_key\n  api_key: vastai-test-secret\n"},
 	}
 	configs := make([]string, 0, len(cases))
 	for _, test := range cases {

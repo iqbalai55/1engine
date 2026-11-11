@@ -19,10 +19,11 @@ const (
 	BackendGCP    BackendType = "gcp"
 	BackendNebius BackendType = "nebius"
 	BackendRunPod BackendType = "runpod"
+	BackendVastAI BackendType = "vastai"
 )
 
 var supportedBackendTypes = map[BackendType]struct{}{
-	BackendAWS: {}, BackendGCP: {}, BackendNebius: {}, BackendRunPod: {},
+	BackendAWS: {}, BackendGCP: {}, BackendNebius: {}, BackendRunPod: {}, BackendVastAI: {},
 }
 
 type ProviderBackend struct {

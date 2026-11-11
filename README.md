@@ -15,7 +15,7 @@ The current release includes dstack integration. Beta9 is a planned provider int
 5. Run `go run ./cmd/server` from the repository root.
 
 Set `PROVIDER_BACKENDS_FILE` to a read-only YAML file with one or more dstack backend
-definitions for `aws`, `gcp`, `nebius`, or `runpod`. The backend applies them to tenant
+definitions for `aws`, `gcp`, `nebius`, `runpod`, or `vastai`. The backend applies them to tenant
 projects and restricts customer fleet and run plans to those configured providers. Restart
 the service after editing the file. Each instance is charged the USD-per-hour price that dstack
 reports for that instance, as dstack does, so provider and instance-type prices are not shared.
