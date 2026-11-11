@@ -99,6 +99,49 @@ func TestConfiguredBackendPlansStayWithinEnabledProviderSet(t *testing.T) {
 	}
 }
 
+func TestProxyExecutesRunPlanForTheTenantProject(t *testing.T) {
+	backends, err := ParseProviderBackends([]byte("backends:\n  - type: aws\n  - type: runpod\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var forwarded string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		forwarded = string(body)
+		if r.URL.Path != "/api/project/tenant-project/runs/get_plan" {
+			t.Errorf("forwarded path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tenant-token" {
+			t.Errorf("authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"project_name":"tenant-project","user":"tenant-user","run_spec":{},"job_plans":[{"job_spec":{},"offers":[{"backend":"aws","price":0.75}],"total_offers":1}],"action":"create"}`))
+	}))
+	defer server.Close()
+	proxy := NewProxy(server.URL, proxyCredential("tenant-token"), nil, nil)
+	proxy.Backends = backends
+	proxy.HTTP = server.Client()
+	op := Operation{
+		Method:  http.MethodPost,
+		Path:    "/api/project/tenant-project/runs/get_plan",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"run_spec":{"run_name":"hello","configuration":{"type":"task"}}}`),
+	}
+	resp, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Project: "tenant-project", Username: "tenant-user", Provision: domain.ProvisionReady}, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != http.StatusOK || !strings.Contains(string(resp.Body), `"job_plans"`) || !strings.Contains(string(resp.Body), `"price":0.75`) {
+		t.Fatalf("plan response = %d %s", resp.Status, resp.Body)
+	}
+	if !strings.Contains(forwarded, `"backends":["aws","runpod"]`) {
+		t.Fatalf("forwarded plan did not select the configured backends: %s", forwarded)
+	}
+	if strings.Contains(forwarded, "project_name") || strings.Contains(forwarded, "tenant_id") {
+		t.Fatalf("plan request leaked a project field the proxy should own: %s", forwarded)
+	}
+}
+
 func TestProxyBindsTenantProjectAndUserOnlyAtDocumentedFields(t *testing.T) {
 	got, err := bindProject([]byte(`{"project_name":"","username":"","description":"project other"}`), "/api/runs/list", "tenant-project", "tenant-project-id", "tenant-user")
 	if err != nil {
