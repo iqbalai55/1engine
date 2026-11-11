@@ -119,6 +119,76 @@ func TestAdminTokenRefreshFailsClosedWhenEndpointUnavailable(t *testing.T) {
 	}
 }
 
+func TestSharedAccountFailsClosedWithoutProjectPermission(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"user", `{"username":"provider-user","permissions":{"can_create_projects":false}}`, "cannot create projects"},
+		{"empty username", `{"username":"","permissions":{"can_create_projects":true}}`, "no username"},
+	} {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(test.body))
+		}))
+		provisioner := &Provisioner{Admin: AdminClient{BaseURL: server.URL, Token: "provider-token", HTTP: server.Client()}}
+		if _, err := provisioner.sharedAccount(context.Background()); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("%s: error = %v, want %q", test.name, err, test.want)
+		}
+		server.Close()
+	}
+}
+
+func TestSharedAccountRequiresProjectCreation(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"username":"provider-user","global_role":"user","permissions":{"can_create_projects":true}}`))
+	}))
+	defer server.Close()
+	provisioner := &Provisioner{Admin: AdminClient{BaseURL: server.URL, Token: "provider-token", HTTP: server.Client()}}
+	me, err := provisioner.sharedAccount(context.Background())
+	if err != nil || me.Username != "provider-user" {
+		t.Fatalf("shared account = %+v, %v", me, err)
+	}
+}
+
+func TestEnsureProjectCreatesOrReusesTheTenantProject(t *testing.T) {
+	var paths []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/api/projects/create":
+			_, _ = w.Write([]byte(`{"project_id":"2f6f2f1c-0000-4000-8000-000000000001","project_name":"tenant-project","owner":{"username":"provider-user"}}`))
+		case "/api/projects/tenant-project/get":
+			_, _ = w.Write([]byte(`{"project_id":"2f6f2f1c-0000-4000-8000-000000000001","project_name":"tenant-project","owner":{"username":"provider-user"}}`))
+		}
+	}))
+	defer server.Close()
+	provisioner := &Provisioner{Admin: AdminClient{BaseURL: server.URL, Token: "provider-token", HTTP: server.Client()}}
+	project, err := provisioner.ensureProject(context.Background(), "tenant-project")
+	if err != nil || project.ProjectID != "2f6f2f1c-0000-4000-8000-000000000001" || project.Owner.Username != "provider-user" {
+		t.Fatalf("created project = %+v, %v", project, err)
+	}
+	if len(paths) != 1 || paths[0] != "/api/projects/create" {
+		t.Fatalf("paths = %v", paths)
+	}
+}
+
+func TestEnsureProjectRejectsAnExistingProjectWithAnotherName(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/projects/create" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"detail":[{"code":"resource_exists"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"project_id":"2f6f2f1c-0000-4000-8000-000000000001","project_name":"other-project"}`))
+	}))
+	defer server.Close()
+	provisioner := &Provisioner{Admin: AdminClient{BaseURL: server.URL, Token: "provider-token", HTTP: server.Client()}}
+	if _, err := provisioner.ensureProject(context.Background(), "tenant-project"); err == nil {
+		t.Fatal("existing project with another name was accepted")
+	}
+}
+
 func TestProvisionIdentityCannotChangeEndpointPath(t *testing.T) {
 	for _, test := range []struct {
 		username string

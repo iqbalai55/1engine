@@ -33,6 +33,12 @@ type Config struct {
 	VerifyTLS            bool
 }
 
+// SharedDStackProject reports whether tenant workloads run under one provider account
+// that manages its own compute pools, as a hosted dstack service does.
+func (c Config) SharedDStackProject() bool {
+	return c.DStackTokenMode == "shared_project"
+}
+
 func Load() (Config, error) {
 	cfg := Config{
 		DatabaseURL:          os.Getenv("DATABASE_URL"),
@@ -60,8 +66,13 @@ func Load() (Config, error) {
 	if cfg.MidtransEnvironment == "" {
 		cfg.MidtransEnvironment = "sandbox"
 	}
-	if cfg.DStackTokenMode != "admin_refresh" {
-		return Config{}, errors.New("DSTACK_CUSTOMER_TOKEN_MODE must be admin_refresh; the installed dstack must support /api/users/refresh_token")
+	switch cfg.DStackTokenMode {
+	case "admin_refresh", "shared_project":
+	default:
+		return Config{}, errors.New("DSTACK_CUSTOMER_TOKEN_MODE must be admin_refresh or shared_project")
+	}
+	if cfg.SharedDStackProject() && strings.TrimSpace(cfg.ProviderBackendsPath) != "" {
+		return Config{}, errors.New("PROVIDER_BACKENDS_FILE must be empty when DSTACK_CUSTOMER_TOKEN_MODE is shared_project")
 	}
 	for _, raw := range strings.Split(os.Getenv("TRUSTED_PROXY_CIDRS"), ",") {
 		cidr := strings.TrimSpace(raw)

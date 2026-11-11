@@ -97,6 +97,11 @@ func (s *Service) SetProjectID(ctx context.Context, id domain.TenantID, projectI
 	return err
 }
 
+func (s *Service) SetAccountUsername(ctx context.Context, id domain.TenantID, username string) error {
+	_, err := s.DB.Exec(ctx, `UPDATE tenants SET dstack_account_username=$2 WHERE id=$1 AND (dstack_account_username IS NULL OR dstack_account_username=$2)`, string(id), username)
+	return err
+}
+
 func (s *Service) MarkProvisionFailed(ctx context.Context, id domain.TenantID) error {
 	_, err := s.DB.Exec(ctx, `UPDATE tenants SET dstack_provision_state='failed',state='provisioning' WHERE id=$1`, string(id))
 	return err
@@ -158,7 +163,7 @@ func (s *Service) SetMarkup(ctx context.Context, id domain.TenantID, bps domain.
 }
 
 func (s *Service) List(ctx context.Context) ([]domain.Tenant, error) {
-	rows, err := s.DB.Query(ctx, `SELECT id,owner_user_id,dstack_username,dstack_project,dstack_provision_state,markup_bps,state FROM tenants ORDER BY created_at`)
+	rows, err := s.DB.Query(ctx, `SELECT id,owner_user_id,dstack_username,dstack_project,dstack_provision_state,markup_bps,state,COALESCE(dstack_account_username,'') FROM tenants ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +171,7 @@ func (s *Service) List(ctx context.Context) ([]domain.Tenant, error) {
 	var tenants []domain.Tenant
 	for rows.Next() {
 		var t domain.Tenant
-		if err := rows.Scan(&t.ID, &t.Owner, &t.DStack.Username, &t.DStack.Project, &t.DStack.Provision, &t.Markup, &t.State); err != nil {
+		if err := rows.Scan(&t.ID, &t.Owner, &t.DStack.Username, &t.DStack.Project, &t.DStack.Provision, &t.Markup, &t.State, &t.DStack.AccountUsername); err != nil {
 			return nil, err
 		}
 		tenants = append(tenants, t)
@@ -176,7 +181,7 @@ func (s *Service) List(ctx context.Context) ([]domain.Tenant, error) {
 
 func (s *Service) Get(ctx context.Context, id domain.TenantID) (domain.Tenant, error) {
 	var t domain.Tenant
-	err := s.DB.QueryRow(ctx, `SELECT id,owner_user_id,dstack_username,dstack_project,dstack_provision_state,markup_bps,state,COALESCE(dstack_project_id::text,'') FROM tenants WHERE id=$1`, string(id)).Scan(&t.ID, &t.Owner, &t.DStack.Username, &t.DStack.Project, &t.DStack.Provision, &t.Markup, &t.State, &t.DStack.ProjectID)
+	err := s.DB.QueryRow(ctx, `SELECT id,owner_user_id,dstack_username,dstack_project,dstack_provision_state,markup_bps,state,COALESCE(dstack_project_id::text,''),COALESCE(dstack_account_username,'') FROM tenants WHERE id=$1`, string(id)).Scan(&t.ID, &t.Owner, &t.DStack.Username, &t.DStack.Project, &t.DStack.Provision, &t.Markup, &t.State, &t.DStack.ProjectID, &t.DStack.AccountUsername)
 	return t, err
 }
 

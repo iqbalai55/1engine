@@ -60,6 +60,9 @@ type Proxy struct {
 	Ledger        ledger.ReservationService
 	Policies      []RoutePolicy
 	PriceKey      string
+	// SharedProject is set when every tenant workload runs under one provider account that
+	// manages compute pools itself, so plans carry no backend selection.
+	SharedProject bool
 }
 
 type NoRedirectClient struct{ Client *http.Client }
@@ -135,9 +138,6 @@ func (p *Proxy) bindProviderBackends(raw []byte, path string) ([]byte, error) {
 	if !ok {
 		return raw, nil
 	}
-	if len(p.Backends.Types()) == 0 {
-		return nil, errors.New("no compute backends are configured")
-	}
 	var body map[string]any
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return nil, errors.New("dstack request body must be valid JSON")
@@ -154,6 +154,18 @@ func (p *Proxy) bindProviderBackends(raw []byte, path string) ([]byte, error) {
 		if sshConfig, exists := configuration["ssh_config"]; exists && sshConfig != nil {
 			return nil, errors.New("customer SSH fleets are not supported")
 		}
+	}
+	if p.SharedProject {
+		_, configurationSet := configuration["backends"]
+		profile, _ := spec["profile"].(map[string]any)
+		_, profileSet := profile["backends"]
+		if configurationSet || profileSet {
+			return nil, errors.New("backend selection is not available on shared compute pools")
+		}
+		return raw, nil
+	}
+	if len(p.Backends.Types()) == 0 {
+		return nil, errors.New("no compute backends are configured")
 	}
 	profile, _ := spec["profile"].(map[string]any)
 	if err := bindConfiguredBackends(configuration, profile, p.Backends); err != nil {
@@ -244,6 +256,9 @@ func setConfiguredBackendSelection(spec map[string]any, types []string) {
 }
 
 func (p *Proxy) classify(method, path, project string) (OperationKind, error) {
+	if p.SharedProject && strings.HasPrefix(path, "/api/users/public_keys/") {
+		return "", errors.New("dstack account SSH keys are shared on this deployment and cannot be changed by a tenant")
+	}
 	for _, policy := range p.Policies {
 		if method == policy.Method && policy.Pattern.MatchString(path) {
 			if projectPath(path) {
@@ -328,7 +343,7 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 	}
 	if len(op.Body) > 0 {
 		if strings.Contains(strings.ToLower(op.Headers.Get("Content-Type")), "json") {
-			op.Body, err = bindProject(op.Body, op.Path, string(binding.Project), binding.ProjectID, binding.Username)
+			op.Body, err = bindProject(op.Body, op.Path, string(binding.Project), binding.ProjectID, dstackAccountUsername(binding))
 		} else {
 			return SafeResponse{}, errors.New("dstack proxy accepts JSON request bodies only")
 		}
@@ -434,6 +449,13 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 
 func projectPath(path string) bool {
 	return strings.HasPrefix(path, "/api/project/") || strings.HasPrefix(path, "/api/projects/") || strings.HasPrefix(path, "/proxy/")
+}
+
+func dstackAccountUsername(binding domain.DStackBinding) string {
+	if binding.AccountUsername != "" {
+		return binding.AccountUsername
+	}
+	return binding.Username
 }
 
 func bindProject(raw []byte, path, project, projectID, username string) ([]byte, error) {

@@ -50,7 +50,8 @@ func main() {
 	paymentService := &payments.Service{DB: db.Pool, Ledger: ledgerService, Snap: snap}
 	proxy := dstack.NewProxy(cfg.DStackURL, tenantService, cfg.EncryptionKey, ledgerService)
 	proxy.Backends = providerBackends
-	provisioner := &dstack.Provisioner{Identity: identityService, Admin: dstack.AdminClient{BaseURL: cfg.DStackURL, Token: cfg.DStackAdminToken}, Tenant: tenantService, Backends: providerBackends, EncryptionKey: cfg.EncryptionKey, KeyVersion: "v1"}
+	proxy.SharedProject = cfg.SharedDStackProject()
+	provisioner := &dstack.Provisioner{Identity: identityService, Admin: dstack.AdminClient{BaseURL: cfg.DStackURL, Token: cfg.DStackAdminToken}, Tenant: tenantService, Backends: providerBackends, EncryptionKey: cfg.EncryptionKey, KeyVersion: "v1", SharedProject: cfg.SharedDStackProject()}
 	reconciler := &compute.Reconciler{DB: db.Pool, Meter: &compute.Meter{DB: db.Pool, Ledger: ledgerService}, Prices: priceService, Source: &dstack.ObservationClient{BaseURL: cfg.DStackURL, Credentials: tenantService, Tenants: tenantService, EncryptionKey: cfg.EncryptionKey}}
 	go runProvisioner(ctx, provisioner)
 	go runProviderBackendSync(ctx, provisioner)

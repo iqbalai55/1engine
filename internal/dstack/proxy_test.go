@@ -189,6 +189,63 @@ func TestProxyClassifiesDocumentedCustomerOperationsByBillingImpact(t *testing.T
 	}
 }
 
+func TestSharedProjectProxyLeavesPoolSelectionToTheProvider(t *testing.T) {
+	proxy := NewProxy("https://dstack.invalid", nil, nil, nil)
+	proxy.SharedProject = true
+	plan := `{"plan":{"spec":{"configuration":{"type":"fleet"},"profile":{}}},"force":false}`
+	got, err := proxy.bindProviderBackends([]byte(plan), "/api/project/acme/fleets/apply")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != plan {
+		t.Fatalf("bound plan = %s, want it unchanged", got)
+	}
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{"configuration backend selection", `{"plan":{"spec":{"configuration":{"type":"fleet","backends":["aws"]},"profile":{}}},"force":false}`},
+		{"profile backend selection", `{"plan":{"run_spec":{"configuration":{"type":"task"},"profile":{"backends":["aws"]}}},"force":false}`},
+		{"ssh fleet", `{"plan":{"spec":{"configuration":{"type":"fleet","ssh_config":{"hosts":["host"]}},"profile":{}}},"force":false}`},
+	} {
+		if _, err := proxy.bindProviderBackends([]byte(test.body), "/api/project/acme/fleets/apply"); err == nil {
+			t.Errorf("%s was accepted on shared compute", test.name)
+		}
+	}
+}
+
+func TestSharedProjectProxyBlocksAccountSSHKeys(t *testing.T) {
+	proxy := NewProxy("https://dstack.invalid", nil, nil, nil)
+	if _, err := proxy.classify(http.MethodPost, "/api/users/public_keys/list", ""); err != nil {
+		t.Fatalf("account key listing denied before sharing was enabled: %v", err)
+	}
+	proxy.SharedProject = true
+	for _, path := range []string{"/api/users/public_keys/list", "/api/users/public_keys/add", "/api/users/public_keys/delete"} {
+		if _, err := proxy.classify(http.MethodPost, path, ""); err == nil {
+			t.Errorf("%s was allowed on a shared provider account", path)
+		}
+	}
+}
+
+func TestSharedProjectProxyBindsOwningAccountUsername(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != `{"only_active":true,"project_name":"tenant-project","username":"provider-user"}` {
+			t.Errorf("forwarded body = %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+	proxy := NewProxy(server.URL, proxyCredential("provider-token"), nil, nil)
+	proxy.HTTP = server.Client()
+	proxy.SharedProject = true
+	binding := domain.DStackBinding{Project: "tenant-project", Username: "tenant-user", AccountUsername: "provider-user", Provision: domain.ProvisionReady}
+	if _, err := proxy.Execute(context.Background(), "tenant-id", binding, Operation{Method: http.MethodPost, Path: "/api/runs/list", Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProjectPathRewriteEscapesValidatedName(t *testing.T) {
 	proxy := NewProxy("https://dstack.invalid", proxyCredential("customer-secret"), nil, nil)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

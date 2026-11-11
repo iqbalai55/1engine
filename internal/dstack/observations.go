@@ -61,7 +61,7 @@ func (c *ObservationClient) listTenantObservations(ctx context.Context, tenant d
 	case "runs":
 		path, timeField, idField = "/api/runs/list", "prev_submitted_at", "prev_run_id"
 		body["project_name"] = string(binding.DStack.Project)
-		body["username"] = binding.DStack.Username
+		body["username"] = dstackAccountUsername(binding.DStack)
 	case "instances":
 		path, timeField, idField = "/api/instances/list", "prev_created_at", "prev_id"
 		body["project_names"] = []string{string(binding.DStack.Project)}

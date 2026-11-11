@@ -80,6 +80,9 @@ type DStackBinding struct {
 	Project   ProjectName
 	ProjectID string
 	Provision ProvisionState
+	// AccountUsername is the dstack account that owns this tenant's workloads when the
+	// deployment shares one provider account. Empty means Username owns them.
+	AccountUsername string
 }
 
 type Admission struct {

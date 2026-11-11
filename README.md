@@ -34,6 +34,16 @@ go run ./cmd/provider-bootstrap provider-admin --email provider@example.com
 
 The database permits one provider account. The command fails after the first successful bootstrap.
 
+## Use a hosted dstack service
+
+Set `DSTACK_CUSTOMER_TOKEN_MODE=shared_project` to run every tenant under one dstack account instead of a self-hosted dstack server with global admin rights. `DSTACK_URL` points at the hosted service and `DSTACK_ADMIN_TOKEN` holds that account's token. Leave `PROVIDER_BACKENDS_FILE` empty, because the hosted service supplies its own compute pools.
+
+Provisioning then creates one dstack project per tenant under the shared account, records that account in `tenants.dstack_account_username`, and stores its token as the tenant credential. It creates no dstack users, adds no project members, writes no cloud backends, and never refreshes a tenant token. The service checks `/api/users/get_my_user` first and fails closed unless the account may create projects.
+
+Customer requests stay limited to their own project, because the proxy rewrites and rejects every project name and project ID. Two limits come with the shared account. SSH keys belong to the account, so the proxy blocks `/api/users/public_keys/*` and tenants cannot manage keys. The account token is also the only credential, so project isolation rests on the proxy's project checks alone, not on dstack authorization. Hosted plans carry no `backends` selection, and a plan that sets one is rejected.
+
+Charges stay blocked until the instance price is verified with `PUT /v1/provider/price`, exactly as for a self-hosted server.
+
 ## Test
 
 ```sh
