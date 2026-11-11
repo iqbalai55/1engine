@@ -17,8 +17,8 @@ func TestLiveSharedProjectProvisioning(t *testing.T) {
 		t.Skip("SKY_PROBE_URL and SKY_PROBE_TOKEN are not set")
 	}
 	client := AdminClient{BaseURL: baseURL, Token: token}
-	provisioner := &Provisioner{Admin: client, EncryptionKey: []byte("0123456789abcdef0123456789abcdef"), KeyVersion: "v1"}
-	me, err := provisioner.sharedAccount(context.Background())
+	provisioner := &Provisioner{EncryptionKey: []byte("0123456789abcdef0123456789abcdef"), KeyVersion: "v1"}
+	me, err := sharedAccount(context.Background(), client)
 	if err != nil {
 		t.Fatalf("shared account check failed: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestLiveSharedProjectProvisioning(t *testing.T) {
 			t.Logf("probe project %q cleanup failed: %v", name, err)
 		}
 	}()
-	project, err := provisioner.ensureProject(context.Background(), name)
+	project, err := provisioner.ensureProject(context.Background(), client, name)
 	if err != nil {
 		t.Fatalf("ensure project failed: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestLiveSharedProjectProvisioning(t *testing.T) {
 	if project.Owner.Username != me.Username {
 		t.Fatalf("project owner = %q, want %q", project.Owner.Username, me.Username)
 	}
-	reused, err := provisioner.ensureProject(context.Background(), name)
+	reused, err := provisioner.ensureProject(context.Background(), client, name)
 	if err != nil || reused.ProjectID != project.ProjectID {
 		t.Fatalf("reused project = %+v, %v", reused, err)
 	}

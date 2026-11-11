@@ -12,6 +12,7 @@ var loadEnvNames = []string{
 	"DATABASE_URL",
 	"DSTACK_ADMIN_TOKEN",
 	"DSTACK_CUSTOMER_TOKEN_MODE",
+	"DSTACK_SERVERS",
 	"DSTACK_ENCRYPTION_KEY",
 	"DSTACK_URL",
 	"LISTEN_ADDR",
@@ -39,6 +40,7 @@ func baseEnv() map[string]string {
 		"DATABASE_URL":               "postgres://billing:billing@localhost:5432/billing",
 		"DSTACK_ADMIN_TOKEN":         "dstack-admin-token",
 		"DSTACK_CUSTOMER_TOKEN_MODE": "admin_refresh",
+		"DSTACK_SERVERS":             "",
 		"DSTACK_ENCRYPTION_KEY":      strings.Repeat("k", 32),
 		"DSTACK_URL":                 "https://dstack.internal",
 		"LISTEN_ADDR":                "",
@@ -110,8 +112,32 @@ func TestLoadAcceptsCompleteEnvironment(t *testing.T) {
 			name:      "accepts shared project mode without provider backends",
 			overrides: map[string]string{"DSTACK_CUSTOMER_TOKEN_MODE": "shared_project"},
 			check: func(t *testing.T, cfg Config) {
-				if !cfg.SharedDStackProject() {
-					t.Fatal("SharedDStackProject = false, want true")
+				servers := cfg.DStackServers()
+				if len(servers) != 1 || servers[0].Name != "default" || servers[0].Mode != "shared_project" {
+					t.Fatalf("servers = %+v", servers)
+				}
+			},
+		},
+		{
+			name: "reads multiple dstack servers from the server list",
+			overrides: map[string]string{
+				"DSTACK_URL":                 "",
+				"DSTACK_ADMIN_TOKEN":         "",
+				"DSTACK_CUSTOMER_TOKEN_MODE": "",
+				"PROVIDER_BACKENDS_FILE":     "",
+				"DSTACK_SERVERS": `[{"name":"self-hosted","url":"https://dstack.internal","token":"admin-token","mode":"admin_refresh","provider_backends_file":"./backends.yml"},` +
+					`{"name":"sky","url":"https://sky.dstack.ai","token":"user-token","mode":"shared_project"}]`,
+			},
+			check: func(t *testing.T, cfg Config) {
+				servers := cfg.DStackServers()
+				if len(servers) != 2 || servers[0].Name != "self-hosted" || servers[1].Name != "sky" {
+					t.Fatalf("servers = %+v", servers)
+				}
+				if cfg.DefaultDStackServer() != "self-hosted" {
+					t.Fatalf("default server = %q", cfg.DefaultDStackServer())
+				}
+				if servers[1].ProviderBackendsFile != "" {
+					t.Fatalf("sky backends file = %q, want empty", servers[1].ProviderBackendsFile)
 				}
 			},
 		},
@@ -244,6 +270,27 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 			name:      "shared project mode rejects provider backends",
 			overrides: map[string]string{"DSTACK_CUSTOMER_TOKEN_MODE": "shared_project", "PROVIDER_BACKENDS_FILE": "./provider-backends.yml"},
 			wantError: "PROVIDER_BACKENDS_FILE must be empty when DSTACK_CUSTOMER_TOKEN_MODE is shared_project",
+		},
+		{
+			name:      "a server list excludes the single-server settings",
+			overrides: map[string]string{"DSTACK_SERVERS": `[{"name":"sky","url":"https://sky.dstack.ai","token":"t","mode":"shared_project"}]`},
+			wantError: "DSTACK_URL must be empty when DSTACK_SERVERS is set",
+		},
+		{
+			name: "a server list needs known fields",
+			overrides: map[string]string{
+				"DSTACK_URL": "", "DSTACK_ADMIN_TOKEN": "", "DSTACK_CUSTOMER_TOKEN_MODE": "", "PROVIDER_BACKENDS_FILE": "",
+				"DSTACK_SERVERS": `[{"name":"sky","url":"https://sky.dstack.ai","token":"t","mode":"shared_project","region":"us"}]`,
+			},
+			wantError: "DSTACK_SERVERS must be a JSON list of dstack servers",
+		},
+		{
+			name: "a server list rejects duplicate names",
+			overrides: map[string]string{
+				"DSTACK_URL": "", "DSTACK_ADMIN_TOKEN": "", "DSTACK_CUSTOMER_TOKEN_MODE": "", "PROVIDER_BACKENDS_FILE": "",
+				"DSTACK_SERVERS": `[{"name":"sky","url":"https://sky.dstack.ai","token":"t","mode":"shared_project"},{"name":"sky","url":"https://sky2.dstack.ai","token":"t","mode":"shared_project"}]`,
+			},
+			wantError: "names a dstack server more than once",
 		},
 		{
 			name:      "trusted proxies must be CIDR ranges",

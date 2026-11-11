@@ -25,9 +25,9 @@ func (s *Service) StateAndMarkup(ctx context.Context, tx store.Querier, id domai
 	return markup, state, err
 }
 
-func (s *Service) CreateForOwner(ctx context.Context, tx store.Querier, owner domain.UserID, username, project string) (domain.TenantID, error) {
+func (s *Service) CreateForOwner(ctx context.Context, tx store.Querier, owner domain.UserID, username, project, server string) (domain.TenantID, error) {
 	var id domain.TenantID
-	err := tx.QueryRow(ctx, `INSERT INTO tenants(owner_user_id,dstack_username,dstack_project) VALUES($1,$2,$3) ON CONFLICT(owner_user_id) DO NOTHING RETURNING id`, string(owner), username, project).Scan(&id)
+	err := tx.QueryRow(ctx, `INSERT INTO tenants(owner_user_id,dstack_username,dstack_project,dstack_server) VALUES($1,$2,$3,$4) ON CONFLICT(owner_user_id) DO NOTHING RETURNING id`, string(owner), username, project, server).Scan(&id)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return "", err
@@ -86,9 +86,9 @@ func (s *Service) ListReadyForUsage(ctx context.Context, limit int) ([]domain.Te
 	return ids, rows.Err()
 }
 
-func (s *Service) HasCredential(ctx context.Context, id domain.TenantID) (bool, error) {
+func (s *Service) HasCredential(ctx context.Context, id domain.TenantID, server string) (bool, error) {
 	var exists bool
-	err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tenant_dstack_credentials WHERE tenant_id=$1)`, string(id)).Scan(&exists)
+	err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tenant_dstack_credentials WHERE tenant_id=$1 AND server=$2)`, string(id), server).Scan(&exists)
 	return exists, err
 }
 
@@ -169,7 +169,7 @@ func (s *Service) SetMarkup(ctx context.Context, id domain.TenantID, bps domain.
 }
 
 func (s *Service) List(ctx context.Context) ([]domain.Tenant, error) {
-	rows, err := s.DB.Query(ctx, `SELECT id,owner_user_id,dstack_username,dstack_project,dstack_provision_state,markup_bps,state,COALESCE(dstack_account_username,'') FROM tenants ORDER BY created_at`)
+	rows, err := s.DB.Query(ctx, `SELECT id,owner_user_id,dstack_username,dstack_project,dstack_provision_state,markup_bps,state,COALESCE(dstack_account_username,''),dstack_server FROM tenants ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +177,7 @@ func (s *Service) List(ctx context.Context) ([]domain.Tenant, error) {
 	var tenants []domain.Tenant
 	for rows.Next() {
 		var t domain.Tenant
-		if err := rows.Scan(&t.ID, &t.Owner, &t.DStack.Username, &t.DStack.Project, &t.DStack.Provision, &t.Markup, &t.State, &t.DStack.AccountUsername); err != nil {
+		if err := rows.Scan(&t.ID, &t.Owner, &t.DStack.Username, &t.DStack.Project, &t.DStack.Provision, &t.Markup, &t.State, &t.DStack.AccountUsername, &t.DStack.Server); err != nil {
 			return nil, err
 		}
 		tenants = append(tenants, t)
@@ -187,7 +187,7 @@ func (s *Service) List(ctx context.Context) ([]domain.Tenant, error) {
 
 func (s *Service) Get(ctx context.Context, id domain.TenantID) (domain.Tenant, error) {
 	var t domain.Tenant
-	err := s.DB.QueryRow(ctx, `SELECT id,owner_user_id,dstack_username,dstack_project,dstack_provision_state,markup_bps,state,COALESCE(dstack_project_id::text,''),COALESCE(dstack_account_username,'') FROM tenants WHERE id=$1`, string(id)).Scan(&t.ID, &t.Owner, &t.DStack.Username, &t.DStack.Project, &t.DStack.Provision, &t.Markup, &t.State, &t.DStack.ProjectID, &t.DStack.AccountUsername)
+	err := s.DB.QueryRow(ctx, `SELECT id,owner_user_id,dstack_username,dstack_project,dstack_provision_state,markup_bps,state,COALESCE(dstack_project_id::text,''),COALESCE(dstack_account_username,''),dstack_server FROM tenants WHERE id=$1`, string(id)).Scan(&t.ID, &t.Owner, &t.DStack.Username, &t.DStack.Project, &t.DStack.Provision, &t.Markup, &t.State, &t.DStack.ProjectID, &t.DStack.AccountUsername, &t.DStack.Server)
 	return t, err
 }
 
@@ -197,7 +197,10 @@ func (s *Service) Markup(ctx context.Context, id domain.TenantID) (domain.Markup
 	return markup, err
 }
 
-func (s *Service) SaveCustomerCredential(ctx context.Context, id domain.TenantID, secret string, key []byte, keyVersion string) error {
+func (s *Service) SaveCustomerCredential(ctx context.Context, id domain.TenantID, server, secret string, key []byte, keyVersion string) error {
+	if strings.TrimSpace(server) == "" {
+		return errors.New("dstack server is required for a tenant credential")
+	}
 	if strings.TrimSpace(secret) == "" {
 		return errors.New("empty dstack credential")
 	}
@@ -205,7 +208,7 @@ func (s *Service) SaveCustomerCredential(ctx context.Context, id domain.TenantID
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.Exec(ctx, `INSERT INTO tenant_dstack_credentials(tenant_id,ciphertext,key_version) VALUES($1,$2,$3) ON CONFLICT(tenant_id) DO UPDATE SET ciphertext=EXCLUDED.ciphertext,key_version=EXCLUDED.key_version,updated_at=now()`, string(id), ciphertext, keyVersion)
+	_, err = s.DB.Exec(ctx, `INSERT INTO tenant_dstack_credentials(tenant_id,server,ciphertext,key_version) VALUES($1,$2,$3,$4) ON CONFLICT(tenant_id,server) DO UPDATE SET ciphertext=EXCLUDED.ciphertext,key_version=EXCLUDED.key_version,updated_at=now()`, string(id), server, ciphertext, keyVersion)
 	if err != nil {
 		return err
 	}
@@ -213,9 +216,9 @@ func (s *Service) SaveCustomerCredential(ctx context.Context, id domain.TenantID
 	return err
 }
 
-func (s *Service) CustomerCredential(ctx context.Context, id domain.TenantID, key []byte) (string, error) {
+func (s *Service) CustomerCredential(ctx context.Context, id domain.TenantID, server string, key []byte) (string, error) {
 	var ciphertext []byte
-	if err := s.DB.QueryRow(ctx, `SELECT ciphertext FROM tenant_dstack_credentials WHERE tenant_id=$1`, string(id)).Scan(&ciphertext); err != nil {
+	if err := s.DB.QueryRow(ctx, `SELECT ciphertext FROM tenant_dstack_credentials WHERE tenant_id=$1 AND server=$2`, string(id), server).Scan(&ciphertext); err != nil {
 		return "", err
 	}
 	return DecryptCredential(key, ciphertext)

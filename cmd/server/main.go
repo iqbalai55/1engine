@@ -36,7 +36,11 @@ func main() {
 	if err := db.Migrate(ctx); err != nil {
 		log.Fatal(err)
 	}
-	providerBackends, err := dstack.LoadProviderBackends(cfg.ProviderBackendsPath)
+	defs, err := buildServers(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	servers, err := dstack.NewServers(defs...)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -45,14 +49,12 @@ func main() {
 	tenantService := &tenant.Service{DB: db.Pool}
 	priceService := &pricing.Service{DB: db.Pool}
 	ledgerService := &ledger.Service{DB: db.Pool, Prices: priceService, Admission: tenantService}
-	identityService := &identity.Service{DB: db.Pool, Mailer: mailer, Tenants: tenantService, Accounts: ledgerService, SessionTTL: 24 * time.Hour, SessionSecret: cfg.SessionSecret}
+	identityService := &identity.Service{DB: db.Pool, Mailer: mailer, Tenants: tenantService, Accounts: ledgerService, SessionTTL: 24 * time.Hour, SessionSecret: cfg.SessionSecret, DefaultServer: cfg.DefaultDStackServer()}
 	snap := payments.SnapClient{Config: payments.SnapConfig{ServerKey: cfg.MidtransServerKey, ClientKey: cfg.MidtransClientKey, BaseURL: cfg.MidtransBaseURL, StatusURL: cfg.MidtransStatusURL, Environment: cfg.MidtransEnvironment, PublicBaseURL: cfg.PublicBaseURL}}
 	paymentService := &payments.Service{DB: db.Pool, Ledger: ledgerService, Snap: snap}
-	proxy := dstack.NewProxy(cfg.DStackURL, tenantService, cfg.EncryptionKey, ledgerService)
-	proxy.Backends = providerBackends
-	proxy.SharedProject = cfg.SharedDStackProject()
-	provisioner := &dstack.Provisioner{Identity: identityService, Admin: dstack.AdminClient{BaseURL: cfg.DStackURL, Token: cfg.DStackAdminToken}, Tenant: tenantService, Backends: providerBackends, EncryptionKey: cfg.EncryptionKey, KeyVersion: "v1", SharedProject: cfg.SharedDStackProject()}
-	reconciler := &compute.Reconciler{DB: db.Pool, Meter: &compute.Meter{DB: db.Pool, Ledger: ledgerService}, Prices: priceService, Source: &dstack.ObservationClient{BaseURL: cfg.DStackURL, Credentials: tenantService, Tenants: tenantService, EncryptionKey: cfg.EncryptionKey}}
+	proxy := dstack.NewProxy(servers, tenantService, cfg.EncryptionKey, ledgerService)
+	provisioner := &dstack.Provisioner{Identity: identityService, Servers: servers, Tenant: tenantService, EncryptionKey: cfg.EncryptionKey, KeyVersion: "v1"}
+	reconciler := &compute.Reconciler{DB: db.Pool, Meter: &compute.Meter{DB: db.Pool, Ledger: ledgerService}, Prices: priceService, Source: &dstack.ObservationClient{Servers: servers, Credentials: tenantService, Tenants: tenantService, EncryptionKey: cfg.EncryptionKey}}
 	go runProvisioner(ctx, provisioner)
 	go runProviderBackendSync(ctx, provisioner)
 	go runUsageReconciler(ctx, tenantService, reconciler)
@@ -103,6 +105,19 @@ func runPaymentReconciler(ctx context.Context, service *payments.Service) {
 			_ = service.ReconcileOpen(ctx, 100)
 		}
 	}
+}
+
+// buildServers converts the configured dstack servers into the registry the backend uses.
+func buildServers(cfg config.Config) ([]dstack.Server, error) {
+	servers := make([]dstack.Server, 0, len(cfg.DStackServers()))
+	for _, server := range cfg.DStackServers() {
+		backends, err := dstack.LoadProviderBackends(server.ProviderBackendsFile)
+		if err != nil {
+			return nil, err
+		}
+		servers = append(servers, dstack.Server{Name: server.Name, URL: server.URL, Token: server.Token, Mode: dstack.ServerMode(server.Mode), Backends: backends})
+	}
+	return servers, nil
 }
 
 func runProvisioner(ctx context.Context, provisioner *dstack.Provisioner) {

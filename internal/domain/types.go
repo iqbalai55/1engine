@@ -80,6 +80,8 @@ type DStackBinding struct {
 	Project   ProjectName
 	ProjectID string
 	Provision ProvisionState
+	// Server names the configured dstack server that hosts this tenant's project.
+	Server string
 	// AccountUsername is the dstack account that owns this tenant's workloads when the
 	// deployment shares one provider account. Empty means Username owns them.
 	AccountUsername string

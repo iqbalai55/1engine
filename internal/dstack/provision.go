@@ -26,13 +26,25 @@ type AdminClient struct {
 }
 type Provisioner struct {
 	Identity      *identity.Service
-	Admin         AdminClient
+	Servers       Servers
 	Tenant        *tenant.Service
-	Backends      ProviderBackends
 	EncryptionKey []byte
 	KeyVersion    string
-	SharedProject bool
+	HTTP          *http.Client
 }
+
+func (p *Provisioner) adminClient(server Server) AdminClient {
+	return AdminClient{BaseURL: server.URL, Token: server.Token, HTTP: p.HTTP}
+}
+
+func (p *Provisioner) serverFor(t domain.Tenant) (Server, error) {
+	server, ok := p.Servers.Get(t.DStack.Server)
+	if !ok {
+		return Server{}, errors.New("tenant dstack server is not configured")
+	}
+	return server, nil
+}
+
 type userCreateRequest struct {
 	Username   string `json:"username"`
 	GlobalRole string `json:"global_role"`
@@ -258,7 +270,11 @@ func (p *Provisioner) Provision(ctx context.Context, id domain.TenantID) error {
 	if err != nil {
 		return err
 	}
-	hasCredential, err := p.Tenant.HasCredential(ctx, id)
+	server, err := p.serverFor(t)
+	if err != nil {
+		return p.failed(ctx, id, err)
+	}
+	hasCredential, err := p.Tenant.HasCredential(ctx, id, server.Name)
 	if err != nil {
 		return err
 	}
@@ -271,69 +287,71 @@ func (p *Provisioner) Provision(ctx context.Context, id domain.TenantID) error {
 	if err := validateProvisionIdentity(t.DStack); err != nil {
 		return p.failed(ctx, id, err)
 	}
-	if p.SharedProject {
-		return p.provisionShared(ctx, id, t)
+	if server.Mode == ModeSharedProject {
+		return p.provisionShared(ctx, id, t, server)
 	}
-	return p.provisionOwnedAccount(ctx, id, t)
+	return p.provisionOwnedAccount(ctx, id, t, server)
 }
 
-func (p *Provisioner) provisionOwnedAccount(ctx context.Context, id domain.TenantID, t domain.Tenant) error {
+func (p *Provisioner) provisionOwnedAccount(ctx context.Context, id domain.TenantID, t domain.Tenant, server Server) error {
+	admin := p.adminClient(server)
 	email, err := p.Identity.Email(ctx, string(t.Owner))
 	if err != nil {
 		return err
 	}
-	if err = p.Admin.post(ctx, "/api/users/create", userCreateRequest{Username: t.DStack.Username, GlobalRole: "user", Email: email, Active: true}, nil); err != nil && !errors.Is(err, errResourceExists) {
+	if err = admin.post(ctx, "/api/users/create", userCreateRequest{Username: t.DStack.Username, GlobalRole: "user", Email: email, Active: true}, nil); err != nil && !errors.Is(err, errResourceExists) {
 		return p.failed(ctx, id, err)
 	}
 	if errors.Is(err, errResourceExists) {
 		var existing struct {
 			Username string `json:"username"`
 		}
-		if verifyErr := p.Admin.post(ctx, "/api/users/get_user", map[string]string{"username": t.DStack.Username}, &existing); verifyErr != nil || existing.Username != t.DStack.Username {
+		if verifyErr := admin.post(ctx, "/api/users/get_user", map[string]string{"username": t.DStack.Username}, &existing); verifyErr != nil || existing.Username != t.DStack.Username {
 			return p.failed(ctx, id, errors.New("existing dstack user does not match tenant identity"))
 		}
 	}
-	project, err := p.ensureProject(ctx, string(t.DStack.Project))
+	project, err := p.ensureProject(ctx, admin, string(t.DStack.Project))
 	if err != nil {
 		return p.failed(ctx, id, err)
 	}
 	if err := p.recordProject(ctx, id, t, project); err != nil {
 		return p.failed(ctx, id, err)
 	}
-	if err := p.addAdminMember(ctx, string(t.DStack.Project), t.DStack.Username); err != nil {
+	if err := p.addAdminMember(ctx, admin, string(t.DStack.Project), t.DStack.Username); err != nil {
 		return p.failed(ctx, id, err)
 	}
-	if err := p.applyBackends(ctx, string(t.DStack.Project)); err != nil {
+	if err := p.applyBackends(ctx, admin, string(t.DStack.Project), server.Backends); err != nil {
 		return p.failed(ctx, id, err)
 	}
 	if p.EncryptionKey == nil || p.KeyVersion == "" {
 		return p.failed(ctx, id, errors.New("dstack credential encryption key configuration is unavailable"))
 	}
-	secret, err := p.Admin.RefreshToken(ctx, t.DStack.Username)
+	secret, err := admin.RefreshToken(ctx, t.DStack.Username)
 	if err != nil || strings.TrimSpace(secret) == "" {
 		if err == nil {
 			err = errors.New("dstack admin token refresh returned an empty token")
 		}
 		return p.failed(ctx, id, err)
 	}
-	if err = p.Tenant.SaveCustomerCredential(ctx, id, secret, p.EncryptionKey, p.KeyVersion); err != nil {
+	if err = p.Tenant.SaveCustomerCredential(ctx, id, server.Name, secret, p.EncryptionKey, p.KeyVersion); err != nil {
 		return p.failed(ctx, id, err)
 	}
 	return nil
 }
 
-func (p *Provisioner) provisionShared(ctx context.Context, id domain.TenantID, t domain.Tenant) error {
+func (p *Provisioner) provisionShared(ctx context.Context, id domain.TenantID, t domain.Tenant, server Server) error {
+	admin := p.adminClient(server)
 	if p.EncryptionKey == nil || p.KeyVersion == "" {
 		return p.failed(ctx, id, errors.New("dstack credential encryption key configuration is unavailable"))
 	}
-	if p.Admin.Token == "" || strings.TrimSpace(p.Admin.BaseURL) == "" {
+	if server.Token == "" || strings.TrimSpace(server.URL) == "" {
 		return p.failed(ctx, id, errors.New("dstack provider account token is not configured"))
 	}
-	me, err := p.sharedAccount(ctx)
+	me, err := sharedAccount(ctx, admin)
 	if err != nil {
 		return p.failed(ctx, id, err)
 	}
-	project, err := p.ensureProject(ctx, string(t.DStack.Project))
+	project, err := p.ensureProject(ctx, admin, string(t.DStack.Project))
 	if err != nil {
 		return p.failed(ctx, id, err)
 	}
@@ -346,15 +364,15 @@ func (p *Provisioner) provisionShared(ctx context.Context, id domain.TenantID, t
 	if err := p.Tenant.SetAccountUsername(ctx, id, me.Username); err != nil {
 		return p.failed(ctx, id, err)
 	}
-	if err := p.Tenant.SaveCustomerCredential(ctx, id, p.Admin.Token, p.EncryptionKey, p.KeyVersion); err != nil {
+	if err := p.Tenant.SaveCustomerCredential(ctx, id, server.Name, server.Token, p.EncryptionKey, p.KeyVersion); err != nil {
 		return p.failed(ctx, id, err)
 	}
 	return nil
 }
 
-func (p *Provisioner) sharedAccount(ctx context.Context) (myUserResponse, error) {
+func sharedAccount(ctx context.Context, admin AdminClient) (myUserResponse, error) {
 	var me myUserResponse
-	if err := p.Admin.post(ctx, "/api/users/get_my_user", map[string]any{}, &me); err != nil {
+	if err := admin.post(ctx, "/api/users/get_my_user", map[string]any{}, &me); err != nil {
 		return me, fmt.Errorf("dstack provider account is unavailable: %w", err)
 	}
 	if strings.TrimSpace(me.Username) == "" {
@@ -366,9 +384,9 @@ func (p *Provisioner) sharedAccount(ctx context.Context) (myUserResponse, error)
 	return me, nil
 }
 
-func (p *Provisioner) ensureProject(ctx context.Context, name string) (projectResponse, error) {
+func (p *Provisioner) ensureProject(ctx context.Context, admin AdminClient, name string) (projectResponse, error) {
 	var created projectResponse
-	err := p.Admin.post(ctx, "/api/projects/create", projectCreateRequest{ProjectName: name}, &created)
+	err := admin.post(ctx, "/api/projects/create", projectCreateRequest{ProjectName: name}, &created)
 	if err == nil {
 		return created, nil
 	}
@@ -376,7 +394,7 @@ func (p *Provisioner) ensureProject(ctx context.Context, name string) (projectRe
 		return projectResponse{}, err
 	}
 	var existing projectResponse
-	if verifyErr := p.Admin.post(ctx, "/api/projects/"+url.PathEscape(name)+"/get", map[string]any{}, &existing); verifyErr != nil || existing.ProjectName != name {
+	if verifyErr := admin.post(ctx, "/api/projects/"+url.PathEscape(name)+"/get", map[string]any{}, &existing); verifyErr != nil || existing.ProjectName != name {
 		return projectResponse{}, errors.New("existing dstack project does not match tenant identity")
 	}
 	return existing, nil
@@ -392,9 +410,9 @@ func (p *Provisioner) recordProject(ctx context.Context, id domain.TenantID, t d
 	return p.Tenant.SetProjectID(ctx, id, project.ProjectID)
 }
 
-func (p *Provisioner) addAdminMember(ctx context.Context, project, username string) error {
+func (p *Provisioner) addAdminMember(ctx context.Context, admin AdminClient, project, username string) error {
 	memberPath := "/api/projects/" + url.PathEscape(project) + "/add_members"
-	err := p.Admin.post(ctx, memberPath, addMembersRequest{Members: []memberSetting{{Username: username, ProjectRole: "admin"}}}, nil)
+	err := admin.post(ctx, memberPath, addMembersRequest{Members: []memberSetting{{Username: username, ProjectRole: "admin"}}}, nil)
 	if err == nil {
 		return nil
 	}
@@ -402,19 +420,13 @@ func (p *Provisioner) addAdminMember(ctx context.Context, project, username stri
 		return err
 	}
 	var existing projectResponse
-	if verifyErr := p.Admin.post(ctx, "/api/projects/"+url.PathEscape(project)+"/get", map[string]any{}, &existing); verifyErr != nil || !hasAdminMember(existing, username) {
+	if verifyErr := admin.post(ctx, "/api/projects/"+url.PathEscape(project)+"/get", map[string]any{}, &existing); verifyErr != nil || !hasAdminMember(existing, username) {
 		return errors.New("existing dstack project membership does not match tenant identity")
 	}
 	return nil
 }
 
 func (p *Provisioner) SyncConfiguredBackends(ctx context.Context) error {
-	if p.SharedProject {
-		return nil
-	}
-	if len(p.Backends.Types()) == 0 {
-		return nil
-	}
 	tenants, err := p.Tenant.List(ctx)
 	if err != nil {
 		return err
@@ -424,17 +436,21 @@ func (p *Provisioner) SyncConfiguredBackends(ctx context.Context) error {
 		if current.DStack.Provision != domain.ProvisionReady || current.State == domain.TenantSuspended {
 			continue
 		}
-		if err := p.applyBackends(ctx, string(current.DStack.Project)); err != nil && firstErr == nil {
+		server, ok := p.Servers.Get(current.DStack.Server)
+		if !ok || len(server.Backends.Types()) == 0 {
+			continue
+		}
+		if err := p.applyBackends(ctx, p.adminClient(server), string(current.DStack.Project), server.Backends); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
 }
 
-func (p *Provisioner) applyBackends(ctx context.Context, project string) error {
-	for _, backendType := range p.Backends.Types() {
-		backend, _ := p.Backends.Get(backendType)
-		if err := p.Admin.ApplyBackendConfig(ctx, project, backend); err != nil {
+func (p *Provisioner) applyBackends(ctx context.Context, admin AdminClient, project string, backends ProviderBackends) error {
+	for _, backendType := range backends.Types() {
+		backend, _ := backends.Get(backendType)
+		if err := admin.ApplyBackendConfig(ctx, project, backend); err != nil {
 			return err
 		}
 	}

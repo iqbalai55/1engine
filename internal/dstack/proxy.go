@@ -49,20 +49,16 @@ type SafeResponse struct {
 	Body    []byte
 }
 type CredentialSource interface {
-	CustomerCredential(context.Context, domain.TenantID, []byte) (string, error)
+	CustomerCredential(context.Context, domain.TenantID, string, []byte) (string, error)
 }
 type Proxy struct {
-	BaseURL       string
+	Servers       Servers
 	HTTP          *http.Client
 	Credentials   CredentialSource
-	Backends      ProviderBackends
 	EncryptionKey []byte
 	Ledger        ledger.ReservationService
 	Policies      []RoutePolicy
 	PriceKey      string
-	// SharedProject is set when every tenant workload runs under one provider account that
-	// manages compute pools itself, so plans carry no backend selection.
-	SharedProject bool
 }
 
 type NoRedirectClient struct{ Client *http.Client }
@@ -99,8 +95,8 @@ func defaultPolicies() []RoutePolicy {
 	}
 }
 
-func NewProxy(baseURL string, credentials CredentialSource, key []byte, ledgerService *ledger.Service) *Proxy {
-	return &Proxy{BaseURL: baseURL, Credentials: credentials, EncryptionKey: key, Ledger: ledgerService, Policies: defaultPolicies(), HTTP: &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, PriceKey: "default"}
+func NewProxy(servers Servers, credentials CredentialSource, key []byte, ledgerService *ledger.Service) *Proxy {
+	return &Proxy{Servers: servers, Credentials: credentials, EncryptionKey: key, Ledger: ledgerService, Policies: defaultPolicies(), HTTP: &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, PriceKey: "default"}
 }
 
 type backendPlanKind uint8
@@ -133,7 +129,7 @@ func backendPlanForPath(path string) (backendPlanRoute, bool) {
 	return backendPlanRoute{}, false
 }
 
-func (p *Proxy) bindProviderBackends(raw []byte, path string) ([]byte, error) {
+func (p *Proxy) bindProviderBackends(raw []byte, path string, server Server) ([]byte, error) {
 	route, ok := backendPlanForPath(path)
 	if !ok {
 		return raw, nil
@@ -155,7 +151,7 @@ func (p *Proxy) bindProviderBackends(raw []byte, path string) ([]byte, error) {
 			return nil, errors.New("customer SSH fleets are not supported")
 		}
 	}
-	if p.SharedProject {
+	if server.Mode == ModeSharedProject {
 		_, configurationSet := configuration["backends"]
 		profile, _ := spec["profile"].(map[string]any)
 		_, profileSet := profile["backends"]
@@ -164,11 +160,11 @@ func (p *Proxy) bindProviderBackends(raw []byte, path string) ([]byte, error) {
 		}
 		return raw, nil
 	}
-	if len(p.Backends.Types()) == 0 {
+	if len(server.Backends.Types()) == 0 {
 		return nil, errors.New("no compute backends are configured")
 	}
 	profile, _ := spec["profile"].(map[string]any)
-	if err := bindConfiguredBackends(configuration, profile, p.Backends); err != nil {
+	if err := bindConfiguredBackends(configuration, profile, server.Backends); err != nil {
 		return nil, err
 	}
 	encoded, err := json.Marshal(body)
@@ -255,8 +251,8 @@ func setConfiguredBackendSelection(spec map[string]any, types []string) {
 	spec["backends"] = backends
 }
 
-func (p *Proxy) classify(method, path, project string) (OperationKind, error) {
-	if p.SharedProject && strings.HasPrefix(path, "/api/users/public_keys/") {
+func (p *Proxy) classify(method, path, project string, server Server) (OperationKind, error) {
+	if server.Mode == ModeSharedProject && strings.HasPrefix(path, "/api/users/public_keys/") {
 		return "", errors.New("dstack account SSH keys are shared on this deployment and cannot be changed by a tenant")
 	}
 	for _, policy := range p.Policies {
@@ -285,7 +281,11 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 			return SafeResponse{}, errors.New("dstack route path is invalid")
 		}
 	}
-	kind, err := p.classify(op.Method, op.Path, string(binding.Project))
+	server, ok := p.Servers.Get(binding.Server)
+	if !ok {
+		return SafeResponse{}, domain.ErrTenantUnavailable
+	}
+	kind, err := p.classify(op.Method, op.Path, string(binding.Project), server)
 	if err != nil {
 		return SafeResponse{}, err
 	}
@@ -325,7 +325,7 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 		if !json.Valid(op.Body) {
 			return SafeResponse{}, errors.New("dstack request body must be valid JSON")
 		}
-		op.Body, err = p.bindProviderBackends(op.Body, op.Path)
+		op.Body, err = p.bindProviderBackends(op.Body, op.Path, server)
 		if err != nil {
 			return SafeResponse{}, err
 		}
@@ -333,11 +333,11 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 	if p.Credentials == nil {
 		return SafeResponse{}, domain.ErrTenantUnavailable
 	}
-	base, parseErr := url.Parse(p.BaseURL)
+	base, parseErr := url.Parse(server.URL)
 	if parseErr != nil || base.Scheme != "https" || base.Host == "" || base.User != nil {
 		return SafeResponse{}, errors.New("dstack endpoint must be an absolute HTTPS URL")
 	}
-	credential, err := p.Credentials.CustomerCredential(ctx, tenant, p.EncryptionKey)
+	credential, err := p.Credentials.CustomerCredential(ctx, tenant, server.Name, p.EncryptionKey)
 	if err != nil || credential == "" {
 		return SafeResponse{}, domain.ErrTenantUnavailable
 	}
@@ -382,7 +382,7 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 			return SafeResponse{Status: reservation.ResponseStatus, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: reservation.ResponseBody}, nil
 		}
 	}
-	endpoint, err := url.Parse(strings.TrimRight(p.BaseURL, "/") + path)
+	endpoint, err := url.Parse(strings.TrimRight(server.URL, "/") + path)
 	if err != nil {
 		return SafeResponse{}, err
 	}

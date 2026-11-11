@@ -18,7 +18,7 @@ import (
 )
 
 type ObservationCredentials interface {
-	CustomerCredential(context.Context, domain.TenantID, []byte) (string, error)
+	CustomerCredential(context.Context, domain.TenantID, string, []byte) (string, error)
 }
 
 type ObservationTenantSource interface {
@@ -26,7 +26,7 @@ type ObservationTenantSource interface {
 }
 
 type ObservationClient struct {
-	BaseURL       string
+	Servers       Servers
 	Credentials   ObservationCredentials
 	Tenants       ObservationTenantSource
 	EncryptionKey []byte
@@ -50,7 +50,11 @@ func (c *ObservationClient) listTenantObservations(ctx context.Context, tenant d
 	if err != nil || binding.DStack.Provision != domain.ProvisionReady {
 		return compute.ObservationPage{}, domain.ErrTenantUnavailable
 	}
-	credential, err := c.Credentials.CustomerCredential(ctx, tenant, c.EncryptionKey)
+	server, ok := c.Servers.Get(binding.DStack.Server)
+	if !ok {
+		return compute.ObservationPage{}, domain.ErrTenantUnavailable
+	}
+	credential, err := c.Credentials.CustomerCredential(ctx, tenant, server.Name, c.EncryptionKey)
 	if err != nil || credential == "" {
 		return compute.ObservationPage{}, domain.ErrTenantUnavailable
 	}
@@ -87,7 +91,7 @@ func (c *ObservationClient) listTenantObservations(ctx context.Context, tenant d
 	if err != nil {
 		return compute.ObservationPage{}, err
 	}
-	base, err := url.Parse(c.BaseURL)
+	base, err := url.Parse(server.URL)
 	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil {
 		return compute.ObservationPage{}, errors.New("dstack endpoint must be an absolute HTTPS URL")
 	}

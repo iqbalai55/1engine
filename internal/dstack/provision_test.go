@@ -131,8 +131,8 @@ func TestSharedAccountFailsClosedWithoutProjectPermission(t *testing.T) {
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(test.body))
 		}))
-		provisioner := &Provisioner{Admin: AdminClient{BaseURL: server.URL, Token: "provider-token", HTTP: server.Client()}}
-		if _, err := provisioner.sharedAccount(context.Background()); err == nil || !strings.Contains(err.Error(), test.want) {
+		admin := AdminClient{BaseURL: server.URL, Token: "provider-token", HTTP: server.Client()}
+		if _, err := sharedAccount(context.Background(), admin); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Errorf("%s: error = %v, want %q", test.name, err, test.want)
 		}
 		server.Close()
@@ -144,8 +144,8 @@ func TestSharedAccountRequiresProjectCreation(t *testing.T) {
 		_, _ = w.Write([]byte(`{"username":"provider-user","global_role":"user","permissions":{"can_create_projects":true}}`))
 	}))
 	defer server.Close()
-	provisioner := &Provisioner{Admin: AdminClient{BaseURL: server.URL, Token: "provider-token", HTTP: server.Client()}}
-	me, err := provisioner.sharedAccount(context.Background())
+	admin := AdminClient{BaseURL: server.URL, Token: "provider-token", HTTP: server.Client()}
+	me, err := sharedAccount(context.Background(), admin)
 	if err != nil || me.Username != "provider-user" {
 		t.Fatalf("shared account = %+v, %v", me, err)
 	}
@@ -163,8 +163,8 @@ func TestEnsureProjectCreatesOrReusesTheTenantProject(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	provisioner := &Provisioner{Admin: AdminClient{BaseURL: server.URL, Token: "provider-token", HTTP: server.Client()}}
-	project, err := provisioner.ensureProject(context.Background(), "tenant-project")
+	provisioner := &Provisioner{}
+	project, err := provisioner.ensureProject(context.Background(), AdminClient{BaseURL: server.URL, Token: "provider-token", HTTP: server.Client()}, "tenant-project")
 	if err != nil || project.ProjectID != "2f6f2f1c-0000-4000-8000-000000000001" || project.Owner.Username != "provider-user" {
 		t.Fatalf("created project = %+v, %v", project, err)
 	}
@@ -183,8 +183,8 @@ func TestEnsureProjectRejectsAnExistingProjectWithAnotherName(t *testing.T) {
 		_, _ = w.Write([]byte(`{"project_id":"2f6f2f1c-0000-4000-8000-000000000001","project_name":"other-project"}`))
 	}))
 	defer server.Close()
-	provisioner := &Provisioner{Admin: AdminClient{BaseURL: server.URL, Token: "provider-token", HTTP: server.Client()}}
-	if _, err := provisioner.ensureProject(context.Background(), "tenant-project"); err == nil {
+	provisioner := &Provisioner{}
+	if _, err := provisioner.ensureProject(context.Background(), AdminClient{BaseURL: server.URL, Token: "provider-token", HTTP: server.Client()}, "tenant-project"); err == nil {
 		t.Fatal("existing project with another name was accepted")
 	}
 }

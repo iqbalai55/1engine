@@ -298,7 +298,7 @@ func (s *Server) me(c *gin.Context) {
 		respondError(c, 500, err)
 		return
 	}
-	c.JSON(200, gin.H{"user_id": p.UserID, "email": email, "tenant_id": p.TenantID, "tenant_state": t.State, "dstack_project": t.DStack.Project})
+	c.JSON(200, gin.H{"user_id": p.UserID, "email": email, "tenant_id": p.TenantID, "tenant_state": t.State, "dstack_project": t.DStack.Project, "dstack_server": t.DStack.Server})
 }
 func (s *Server) credits(c *gin.Context) {
 	p := mustPrincipal(c)

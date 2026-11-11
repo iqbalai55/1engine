@@ -1,7 +1,9 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -18,6 +20,7 @@ type Config struct {
 	DStackAdminToken     string
 	DStackTokenMode      string
 	ProviderBackendsPath string
+	dstackServers        []DStackServerConfig
 	MidtransServerKey    string
 	MidtransClientKey    string
 	MidtransBaseURL      string
@@ -33,10 +36,121 @@ type Config struct {
 	VerifyTLS            bool
 }
 
-// SharedDStackProject reports whether tenant workloads run under one provider account
-// that manages its own compute pools, as a hosted dstack service does.
-func (c Config) SharedDStackProject() bool {
-	return c.DStackTokenMode == "shared_project"
+// DStackServerConfig is one dstack server the backend can provision and place workloads on.
+type DStackServerConfig struct {
+	Name                 string `json:"name"`
+	URL                  string `json:"url"`
+	Token                string `json:"token"`
+	Mode                 string `json:"mode"`
+	ProviderBackendsFile string `json:"provider_backends_file"`
+}
+
+// DStackServers returns the configured dstack servers in placement order.
+func (c Config) DStackServers() []DStackServerConfig {
+	return c.dstackServers
+}
+
+// DefaultDStackServer is the server assigned to new tenants.
+func (c Config) DefaultDStackServer() string {
+	if len(c.dstackServers) == 0 {
+		return ""
+	}
+	return c.dstackServers[0].Name
+}
+
+func loadDStackServers(cfg *Config) error {
+	raw := strings.TrimSpace(os.Getenv("DSTACK_SERVERS"))
+	if raw == "" {
+		return loadSingleDStackServer(cfg)
+	}
+	for name, value := range map[string]string{
+		"DSTACK_URL":                 cfg.DStackURL,
+		"DSTACK_ADMIN_TOKEN":         cfg.DStackAdminToken,
+		"DSTACK_CUSTOMER_TOKEN_MODE": cfg.DStackTokenMode,
+		"PROVIDER_BACKENDS_FILE":     cfg.ProviderBackendsPath,
+	} {
+		if strings.TrimSpace(value) != "" {
+			return fmt.Errorf("%s must be empty when DSTACK_SERVERS is set", name)
+		}
+	}
+	var servers []DStackServerConfig
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&servers); err != nil {
+		return errors.New("DSTACK_SERVERS must be a JSON list of dstack servers")
+	}
+	if len(servers) == 0 {
+		return errors.New("DSTACK_SERVERS must list at least one dstack server")
+	}
+	seen := make(map[string]struct{}, len(servers))
+	for _, server := range servers {
+		if err := validateDStackServer(server); err != nil {
+			return err
+		}
+		if _, exists := seen[server.Name]; exists {
+			return errors.New("DSTACK_SERVERS names a dstack server more than once")
+		}
+		seen[server.Name] = struct{}{}
+	}
+	cfg.dstackServers = servers
+	return nil
+}
+
+func loadSingleDStackServer(cfg *Config) error {
+	if strings.TrimSpace(cfg.DStackURL) == "" {
+		return errors.New("DSTACK_URL is required")
+	}
+	parsed, err := url.Parse(cfg.DStackURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return errors.New("DSTACK_URL must be an HTTPS URL")
+	}
+	if strings.TrimSpace(cfg.DStackAdminToken) == "" {
+		return errors.New("DSTACK_ADMIN_TOKEN is required")
+	}
+	switch cfg.DStackTokenMode {
+	case "admin_refresh":
+	case "shared_project":
+		if strings.TrimSpace(cfg.ProviderBackendsPath) != "" {
+			return errors.New("PROVIDER_BACKENDS_FILE must be empty when DSTACK_CUSTOMER_TOKEN_MODE is shared_project")
+		}
+	default:
+		return errors.New("DSTACK_CUSTOMER_TOKEN_MODE must be admin_refresh or shared_project")
+	}
+	server := DStackServerConfig{
+		Name:                 "default",
+		URL:                  cfg.DStackURL,
+		Token:                cfg.DStackAdminToken,
+		Mode:                 cfg.DStackTokenMode,
+		ProviderBackendsFile: cfg.ProviderBackendsPath,
+	}
+	if err := validateDStackServer(server); err != nil {
+		return err
+	}
+	cfg.dstackServers = []DStackServerConfig{server}
+	return nil
+}
+
+func validateDStackServer(server DStackServerConfig) error {
+	if strings.TrimSpace(server.Name) == "" {
+		return errors.New("each dstack server needs a name")
+	}
+	if strings.TrimSpace(server.URL) == "" || strings.TrimSpace(server.Token) == "" {
+		return fmt.Errorf("dstack server %q needs a url and a token", server.Name)
+	}
+	parsed, err := url.Parse(server.URL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return fmt.Errorf("dstack server %q must use an absolute HTTPS URL", server.Name)
+	}
+	switch server.Mode {
+	case "admin_refresh":
+	case "shared_project":
+		if strings.TrimSpace(server.ProviderBackendsFile) != "" {
+			return fmt.Errorf("dstack server %q must not set provider_backends_file in shared_project mode", server.Name)
+		}
+	default:
+		return fmt.Errorf("dstack server %q mode must be admin_refresh or shared_project", server.Name)
+	}
+	return nil
 }
 
 func Load() (Config, error) {
@@ -66,13 +180,8 @@ func Load() (Config, error) {
 	if cfg.MidtransEnvironment == "" {
 		cfg.MidtransEnvironment = "sandbox"
 	}
-	switch cfg.DStackTokenMode {
-	case "admin_refresh", "shared_project":
-	default:
-		return Config{}, errors.New("DSTACK_CUSTOMER_TOKEN_MODE must be admin_refresh or shared_project")
-	}
-	if cfg.SharedDStackProject() && strings.TrimSpace(cfg.ProviderBackendsPath) != "" {
-		return Config{}, errors.New("PROVIDER_BACKENDS_FILE must be empty when DSTACK_CUSTOMER_TOKEN_MODE is shared_project")
+	if err := loadDStackServers(&cfg); err != nil {
+		return Config{}, err
 	}
 	for _, raw := range strings.Split(os.Getenv("TRUSTED_PROXY_CIDRS"), ",") {
 		cidr := strings.TrimSpace(raw)
@@ -100,8 +209,6 @@ func Load() (Config, error) {
 		"DATABASE_URL":          cfg.DatabaseURL,
 		"SESSION_SECRET":        string(cfg.SessionSecret),
 		"DSTACK_ENCRYPTION_KEY": string(cfg.EncryptionKey),
-		"DSTACK_URL":            cfg.DStackURL,
-		"DSTACK_ADMIN_TOKEN":    cfg.DStackAdminToken,
 		"MIDTRANS_SERVER_KEY":   cfg.MidtransServerKey,
 		"MIDTRANS_CLIENT_KEY":   cfg.MidtransClientKey,
 		"PUBLIC_BASE_URL":       cfg.PublicBaseURL,
@@ -138,12 +245,6 @@ func Load() (Config, error) {
 	publicURL, err := url.Parse(cfg.PublicBaseURL)
 	if err != nil || publicURL.Host == "" {
 		return Config{}, errors.New("PUBLIC_BASE_URL must be an absolute HTTPS URL")
-	}
-	for name, value := range map[string]string{"DSTACK_URL": cfg.DStackURL} {
-		parsed, err := url.Parse(value)
-		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
-			return Config{}, errors.New(name + " must be an HTTPS URL")
-		}
 	}
 	if cfg.SMTPPort != 465 {
 		return Config{}, errors.New("SMTP_PORT must use implicit TLS on port 465")

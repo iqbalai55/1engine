@@ -3,6 +3,7 @@ package dstack
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +14,7 @@ import (
 )
 
 func TestPolicyAllowsDocumentedOperationsAndRejectsOthers(t *testing.T) {
-	p := NewProxy("https://dstack.invalid", nil, nil, nil)
+	p := testProxy("https://dstack.invalid", ProviderBackends{}, ModeAdminRefresh, nil)
 	allowed := []struct {
 		method string
 		path   string
@@ -26,7 +27,7 @@ func TestPolicyAllowsDocumentedOperationsAndRejectsOthers(t *testing.T) {
 		{http.MethodPost, "/api/project/acme/runs/stop", OperationStop},
 	}
 	for _, test := range allowed {
-		if kind, err := p.classify(test.method, test.path, "acme"); err != nil || kind != test.kind {
+		if kind, err := p.classify(test.method, test.path, "acme", testServer(ProviderBackends{}, ModeAdminRefresh)); err != nil || kind != test.kind {
 			t.Errorf("%s %s = %q, %v, want %q", test.method, test.path, kind, err, test.kind)
 		}
 	}
@@ -55,7 +56,7 @@ func TestPolicyAllowsDocumentedOperationsAndRejectsOthers(t *testing.T) {
 		{http.MethodDelete, "/api/project/acme/runs/run-1"},
 	}
 	for _, test := range denied {
-		if _, err := p.classify(test.method, test.path, "acme"); err == nil {
+		if _, err := p.classify(test.method, test.path, "acme", testServer(ProviderBackends{}, ModeAdminRefresh)); err == nil {
 			t.Errorf("%s %s was allowed", test.method, test.path)
 		}
 	}
@@ -66,8 +67,7 @@ func TestConfiguredBackendPlansStayWithinEnabledProviderSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxy := NewProxy("https://dstack.invalid", nil, nil, nil)
-	proxy.Backends = backends
+	proxy := testProxy("https://dstack.invalid", ProviderBackends{}, ModeAdminRefresh, nil)
 	cases := []struct {
 		name string
 		path string
@@ -85,7 +85,7 @@ func TestConfiguredBackendPlansStayWithinEnabledProviderSet(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := proxy.bindProviderBackends([]byte(test.body), test.path)
+			got, err := proxy.bindProviderBackends([]byte(test.body), test.path, testServer(backends, ModeAdminRefresh))
 			if test.fail {
 				if err == nil {
 					t.Fatal("invalid provider selection was accepted")
@@ -132,7 +132,7 @@ func TestProxyBindsTenantProjectAndUserOnlyAtDocumentedFields(t *testing.T) {
 
 type proxyCredential string
 
-func (c proxyCredential) CustomerCredential(context.Context, domain.TenantID, []byte) (string, error) {
+func (c proxyCredential) CustomerCredential(context.Context, domain.TenantID, string, []byte) (string, error) {
 	return string(c), nil
 }
 
@@ -154,9 +154,9 @@ func TestProxyForwardsOnlyCustomerCredentialAndTenantScopedRequest(t *testing.T)
 		_, _ = w.Write([]byte(`[]`))
 	}))
 	defer server.Close()
-	proxy := NewProxy(server.URL, proxyCredential("customer-secret"), nil, nil)
+	proxy := testProxy(server.URL, ProviderBackends{}, ModeAdminRefresh, proxyCredential("customer-secret"))
 	proxy.HTTP = server.Client()
-	if _, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Project: "tenant-project", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: "/api/runs/list", Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{}`)}); err != nil {
+	if _, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Server: "test", Project: "tenant-project", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: "/api/runs/list", Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if adminReached {
@@ -165,14 +165,14 @@ func TestProxyForwardsOnlyCustomerCredentialAndTenantScopedRequest(t *testing.T)
 }
 
 func TestProxyRejectsBodyRewriteForUnknownPath(t *testing.T) {
-	proxy := NewProxy("https://dstack.invalid", proxyCredential("customer-secret"), nil, nil)
-	if _, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Project: "tenant-project", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: "/api/project/tenant-project/runs/apply/extra", Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"project_name":"other"}`)}); err == nil {
+	proxy := testProxy("https://dstack.invalid", ProviderBackends{}, ModeAdminRefresh, proxyCredential("customer-secret"))
+	if _, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Server: "test", Project: "tenant-project", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: "/api/project/tenant-project/runs/apply/extra", Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"project_name":"other"}`)}); err == nil {
 		t.Fatal("unknown path was rewritten and accepted")
 	}
 }
 
 func TestProxyClassifiesDocumentedCustomerOperationsByBillingImpact(t *testing.T) {
-	proxy := NewProxy("https://dstack.invalid", nil, nil, nil)
+	proxy := testProxy("https://dstack.invalid", ProviderBackends{}, ModeAdminRefresh, nil)
 	for _, test := range []struct {
 		path string
 		kind OperationKind
@@ -183,17 +183,16 @@ func TestProxyClassifiesDocumentedCustomerOperationsByBillingImpact(t *testing.T
 		{"/api/users/public_keys/add", OperationMutation},
 		{"/api/events/list", OperationRead},
 	} {
-		if kind, err := proxy.classify(http.MethodPost, test.path, "acme"); err != nil || kind != test.kind {
+		if kind, err := proxy.classify(http.MethodPost, test.path, "acme", testServer(ProviderBackends{}, ModeAdminRefresh)); err != nil || kind != test.kind {
 			t.Errorf("customer route %s classified %q, %v, want %q", test.path, kind, err, test.kind)
 		}
 	}
 }
 
 func TestSharedProjectProxyLeavesPoolSelectionToTheProvider(t *testing.T) {
-	proxy := NewProxy("https://dstack.invalid", nil, nil, nil)
-	proxy.SharedProject = true
+	proxy := testProxy("https://dstack.invalid", ProviderBackends{}, ModeAdminRefresh, nil)
 	plan := `{"plan":{"spec":{"configuration":{"type":"fleet"},"profile":{}}},"force":false}`
-	got, err := proxy.bindProviderBackends([]byte(plan), "/api/project/acme/fleets/apply")
+	got, err := proxy.bindProviderBackends([]byte(plan), "/api/project/acme/fleets/apply", testServer(ProviderBackends{}, ModeSharedProject))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,20 +207,19 @@ func TestSharedProjectProxyLeavesPoolSelectionToTheProvider(t *testing.T) {
 		{"profile backend selection", `{"plan":{"run_spec":{"configuration":{"type":"task"},"profile":{"backends":["aws"]}}},"force":false}`},
 		{"ssh fleet", `{"plan":{"spec":{"configuration":{"type":"fleet","ssh_config":{"hosts":["host"]}},"profile":{}}},"force":false}`},
 	} {
-		if _, err := proxy.bindProviderBackends([]byte(test.body), "/api/project/acme/fleets/apply"); err == nil {
+		if _, err := proxy.bindProviderBackends([]byte(test.body), "/api/project/acme/fleets/apply", testServer(ProviderBackends{}, ModeSharedProject)); err == nil {
 			t.Errorf("%s was accepted on shared compute", test.name)
 		}
 	}
 }
 
 func TestSharedProjectProxyBlocksAccountSSHKeys(t *testing.T) {
-	proxy := NewProxy("https://dstack.invalid", nil, nil, nil)
-	if _, err := proxy.classify(http.MethodPost, "/api/users/public_keys/list", ""); err != nil {
+	proxy := testProxy("https://dstack.invalid", ProviderBackends{}, ModeAdminRefresh, nil)
+	if _, err := proxy.classify(http.MethodPost, "/api/users/public_keys/list", "", testServer(ProviderBackends{}, ModeAdminRefresh)); err != nil {
 		t.Fatalf("account key listing denied before sharing was enabled: %v", err)
 	}
-	proxy.SharedProject = true
 	for _, path := range []string{"/api/users/public_keys/list", "/api/users/public_keys/add", "/api/users/public_keys/delete"} {
-		if _, err := proxy.classify(http.MethodPost, path, ""); err == nil {
+		if _, err := proxy.classify(http.MethodPost, path, "", testServer(ProviderBackends{}, ModeSharedProject)); err == nil {
 			t.Errorf("%s was allowed on a shared provider account", path)
 		}
 	}
@@ -237,17 +235,59 @@ func TestSharedProjectProxyBindsOwningAccountUsername(t *testing.T) {
 		_, _ = w.Write([]byte(`[]`))
 	}))
 	defer server.Close()
-	proxy := NewProxy(server.URL, proxyCredential("provider-token"), nil, nil)
+	proxy := testProxy(server.URL, ProviderBackends{}, ModeSharedProject, proxyCredential("provider-token"))
 	proxy.HTTP = server.Client()
-	proxy.SharedProject = true
-	binding := domain.DStackBinding{Project: "tenant-project", Username: "tenant-user", AccountUsername: "provider-user", Provision: domain.ProvisionReady}
+	binding := domain.DStackBinding{Server: "test", Project: "tenant-project", Username: "tenant-user", AccountUsername: "provider-user", Provision: domain.ProvisionReady}
 	if _, err := proxy.Execute(context.Background(), "tenant-id", binding, Operation{Method: http.MethodPost, Path: "/api/runs/list", Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
 }
 
+func TestProxyRoutesEachTenantToItsOwnServer(t *testing.T) {
+	hits := map[string]int{}
+	newServer := func(name string) *httptest.Server {
+		return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits[name]++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		}))
+	}
+	primary, sky := newServer("primary"), newServer("sky")
+	defer primary.Close()
+	defer sky.Close()
+	servers, err := NewServers(
+		Server{Name: "primary", URL: primary.URL, Token: "primary-token", Mode: ModeAdminRefresh},
+		Server{Name: "sky", URL: sky.URL, Token: "sky-token", Mode: ModeSharedProject},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := NewProxy(servers, proxyCredential("tenant-token"), nil, nil)
+	proxy.HTTP = primary.Client()
+	op := Operation{Method: http.MethodPost, Path: "/api/runs/list", Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{}`)}
+	if _, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Server: "sky", Project: "tenant-project", Username: "tenant-user", Provision: domain.ProvisionReady}, op); err != nil {
+		t.Fatal(err)
+	}
+	if hits["sky"] != 1 || hits["primary"] != 0 {
+		t.Fatalf("hits = %v, want only sky", hits)
+	}
+	if _, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Server: "primary", Project: "tenant-project", Username: "tenant-user", Provision: domain.ProvisionReady}, op); err != nil {
+		t.Fatal(err)
+	}
+	if hits["primary"] != 1 {
+		t.Fatalf("hits = %v, want one primary call", hits)
+	}
+	_, err = proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Server: "retired", Project: "tenant-project", Username: "tenant-user", Provision: domain.ProvisionReady}, op)
+	if !errors.Is(err, domain.ErrTenantUnavailable) {
+		t.Fatalf("retired server error = %v", err)
+	}
+	if hits["sky"] != 1 || hits["primary"] != 1 {
+		t.Fatalf("unknown server received a request: %v", hits)
+	}
+}
+
 func TestProjectPathRewriteEscapesValidatedName(t *testing.T) {
-	proxy := NewProxy("https://dstack.invalid", proxyCredential("customer-secret"), nil, nil)
+	proxy := testProxy("https://dstack.invalid", ProviderBackends{}, ModeAdminRefresh, proxyCredential("customer-secret"))
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.EscapedPath() != "/api/project/project%20with%20space/runs/get" {
 			t.Errorf("escaped path = %q", r.URL.EscapedPath())
@@ -256,21 +296,21 @@ func TestProjectPathRewriteEscapesValidatedName(t *testing.T) {
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer server.Close()
-	proxy.BaseURL = server.URL
+	proxy.Servers = testServers(server.URL, ProviderBackends{}, ModeAdminRefresh)
 	proxy.HTTP = server.Client()
-	_, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Project: "project with space", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: "/api/project/project with space/runs/get", Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{}`)})
+	_, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Server: "test", Project: "project with space", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: "/api/project/project with space/runs/get", Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestComputeStartRequiresBoundedIdempotencyKey(t *testing.T) {
-	proxy := NewProxy("https://dstack.invalid", proxyCredential("customer-secret"), nil, nil)
-	_, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Project: "tenant-project", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: "/api/project/tenant-project/runs/apply", Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"plan":{},"force":false}`)})
+	proxy := testProxy("https://dstack.invalid", ProviderBackends{}, ModeAdminRefresh, proxyCredential("customer-secret"))
+	_, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Server: "test", Project: "tenant-project", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: "/api/project/tenant-project/runs/apply", Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"plan":{},"force":false}`)})
 	if err == nil || !strings.Contains(err.Error(), "Idempotency-Key") {
 		t.Fatalf("compute start without identity returned %v", err)
 	}
-	_, err = proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Project: "tenant-project", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: "/api/project/tenant-project/runs/apply", Headers: http.Header{"Content-Type": []string{"application/json"}}, IdempotencyKey: "safe-key", Body: []byte(`not-json`)})
+	_, err = proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Server: "test", Project: "tenant-project", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: "/api/project/tenant-project/runs/apply", Headers: http.Header{"Content-Type": []string{"application/json"}}, IdempotencyKey: "safe-key", Body: []byte(`not-json`)})
 	if err == nil || !strings.Contains(err.Error(), "valid JSON") {
 		t.Fatalf("invalid compute request body returned %v", err)
 	}
@@ -290,33 +330,33 @@ func TestRunApplyRequiresSafeDocumentedPayload(t *testing.T) {
 }
 
 func TestProxyClassifiesDocumentedInstanceRead(t *testing.T) {
-	proxy := NewProxy("https://dstack.invalid", nil, nil, nil)
-	kind, err := proxy.classify(http.MethodPost, "/api/project/acme/instances/get", "acme")
+	proxy := testProxy("https://dstack.invalid", ProviderBackends{}, ModeAdminRefresh, nil)
+	kind, err := proxy.classify(http.MethodPost, "/api/project/acme/instances/get", "acme", testServer(ProviderBackends{}, ModeAdminRefresh))
 	if err != nil || kind != OperationRead {
 		t.Fatalf("documented instance read = %q, %v", kind, err)
 	}
 }
 
 func TestProxyRejectsPathVariantsAndQueryRewrites(t *testing.T) {
-	proxy := NewProxy("https://dstack.invalid", nil, nil, nil)
+	proxy := testProxy("https://dstack.invalid", ProviderBackends{}, ModeAdminRefresh, nil)
 	for _, path := range []string{"/api/project/acme/runs/get/..", "/api/project/acme%2fruns/get", "//evil.example/api/runs/list"} {
-		if _, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Project: "acme", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: path}); err == nil {
+		if _, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Server: "test", Project: "acme", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: path}); err == nil {
 			t.Errorf("path variant %q was accepted", path)
 		}
 	}
-	if _, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Project: "acme", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: "/api/runs/list", Query: map[string][]string{"project_name": {"other"}}}); err == nil {
+	if _, err := proxy.Execute(context.Background(), "tenant-id", domain.DStackBinding{Server: "test", Project: "acme", Username: "tenant-user", Provision: domain.ProvisionReady}, Operation{Method: http.MethodPost, Path: "/api/runs/list", Query: map[string][]string{"project_name": {"other"}}}); err == nil {
 		t.Fatal("query was allowed to select another project")
 	}
 }
 
 func TestProxyScopesModelAndServicePathsToTenantProject(t *testing.T) {
-	proxy := NewProxy("https://dstack.invalid", nil, nil, nil)
+	proxy := testProxy("https://dstack.invalid", ProviderBackends{}, ModeAdminRefresh, nil)
 	for _, path := range []string{
 		"/proxy/models/other-project/models",
 		"/proxy/models/other-project/chat/completions",
 		"/proxy/services/other-project/run-1",
 	} {
-		if _, err := proxy.classify(http.MethodGet, path, "tenant-project"); err == nil {
+		if _, err := proxy.classify(http.MethodGet, path, "tenant-project", testServer(ProviderBackends{}, ModeAdminRefresh)); err == nil {
 			t.Fatalf("cross-project proxy path %q was accepted", path)
 		}
 	}
@@ -329,7 +369,7 @@ func TestProxyScopesModelAndServicePathsToTenantProject(t *testing.T) {
 		{http.MethodPost, "/proxy/models/tenant-project/chat/completions", OperationStart},
 		{http.MethodGet, "/proxy/services/tenant-project/run-1", OperationRead},
 	} {
-		if kind, err := proxy.classify(test.method, test.path, "tenant-project"); err != nil || kind != test.kind {
+		if kind, err := proxy.classify(test.method, test.path, "tenant-project", testServer(ProviderBackends{}, ModeAdminRefresh)); err != nil || kind != test.kind {
 			t.Errorf("tenant proxy route %s %s classified %q, %v", test.method, test.path, kind, err)
 		}
 	}

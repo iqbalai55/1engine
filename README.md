@@ -34,15 +34,30 @@ go run ./cmd/provider-bootstrap provider-admin --email provider@example.com
 
 The database permits one provider account. The command fails after the first successful bootstrap.
 
-## Use a hosted dstack service
+## Dstack servers
 
-Set `DSTACK_CUSTOMER_TOKEN_MODE=shared_project` to run every tenant under one dstack account instead of a self-hosted dstack server with global admin rights. `DSTACK_URL` points at the hosted service and `DSTACK_ADMIN_TOKEN` holds that account's token. Leave `PROVIDER_BACKENDS_FILE` empty, because the hosted service supplies its own compute pools.
+The backend can use one dstack server or several. Set `DSTACK_SERVERS` to a JSON list and the service provisions and places workloads on every server it names:
 
-Provisioning then creates one dstack project per tenant under the shared account, records that account in `tenants.dstack_account_username`, and stores its token as the tenant credential. It creates no dstack users, adds no project members, writes no cloud backends, and never refreshes a tenant token. The service checks `/api/users/get_my_user` first and fails closed unless the account may create projects.
+```sh
+DSTACK_SERVERS='[
+  {"name":"self-hosted","url":"https://dstack.internal","token":"admin-token","mode":"admin_refresh","provider_backends_file":"/config/provider-backends.yml"},
+  {"name":"sky","url":"https://sky.dstack.ai","token":"user-token","mode":"shared_project"}
+]'
+```
 
-Customer requests stay limited to their own project, because the proxy rewrites and rejects every project name and project ID. Two limits come with the shared account. SSH keys belong to the account, so the proxy blocks `/api/users/public_keys/*` and tenants cannot manage keys. The account token is also the only credential, so project isolation rests on the proxy's project checks alone, not on dstack authorization. Hosted plans carry no `backends` selection, and a plan that sets one is rejected.
+Each entry has a unique `name`, an HTTPS `url`, a `token`, a `mode`, and an optional `provider_backends_file`. When `DSTACK_SERVERS` is set, `DSTACK_URL`, `DSTACK_ADMIN_TOKEN`, `DSTACK_CUSTOMER_TOKEN_MODE`, and `PROVIDER_BACKENDS_FILE` must be empty. Without `DSTACK_SERVERS`, those four settings define one server named `default`, so existing deployments need no change.
 
-Charges stay blocked until the instance price is verified with `PUT /v1/provider/price`, exactly as for a self-hosted server.
+New tenants are created on the first server in the list and record it in `tenants.dstack_server`. Provisioning, proxying, and usage metering then use that server only, so a tenant draws compute from its own server's pools. Tenants created before this setting existed belong to `default`.
+
+### Modes
+
+`admin_refresh` is a server that grants global admin. The backend creates one dstack user and one project per tenant, adds the user to the project, writes the server's provider backends into that project, and mints the tenant token through `/api/users/refresh_token`.
+
+`shared_project` is a server that gives only an ordinary account, as a hosted service does. The backend creates one project per tenant under that account, records the account in `tenants.dstack_account_username`, and stores the account token as the tenant credential. It creates no dstack users, adds no project members, writes no cloud backends, and never refreshes a tenant token. It first calls `/api/users/get_my_user` and fails closed unless the account may create projects.
+
+Published plans on a `shared_project` server carry no `backends` selection, and a plan that sets one is rejected. SSH keys belong to the account on such a server, so `/api/users/public_keys/*` is blocked for tenants. Project isolation there rests on the proxy's project checks, not on dstack authorization, because every tenant shares one account token.
+
+Charges stay blocked until the instance price is verified with `PUT /v1/provider/price`, whichever server supplied the instance.
 
 ## Test
 
