@@ -28,6 +28,7 @@ var loadEnvNames = []string{
 	"SMTP_PORT",
 	"SMTP_USER",
 	"SMTP_VERIFY_TLS",
+	"TRUSTED_PROXY_CIDRS",
 }
 
 // baseEnv is a complete and valid environment for Load. Empty values mean the
@@ -53,6 +54,7 @@ func baseEnv() map[string]string {
 		"SMTP_PORT":                  "465",
 		"SMTP_USER":                  "smtp-user",
 		"SMTP_VERIFY_TLS":            "true",
+		"TRUSTED_PROXY_CIDRS":        "",
 	}
 }
 
@@ -91,6 +93,15 @@ func TestLoadAcceptsCompleteEnvironment(t *testing.T) {
 				wantString(t, cfg.MidtransEnvironment, "sandbox", "MidtransEnvironment")
 				wantString(t, cfg.MidtransBaseURL, "https://app.sandbox.midtrans.com", "MidtransBaseURL")
 				wantString(t, cfg.MidtransStatusURL, "https://api.sandbox.midtrans.com", "MidtransStatusURL")
+			},
+		},
+		{
+			name:      "parses trusted proxy CIDR ranges",
+			overrides: map[string]string{"TRUSTED_PROXY_CIDRS": "10.0.0.0/8, 192.0.2.1/32"},
+			check: func(t *testing.T, cfg Config) {
+				if len(cfg.TrustedProxyCIDRs) != 2 || cfg.TrustedProxyCIDRs[0] != "10.0.0.0/8" || cfg.TrustedProxyCIDRs[1] != "192.0.2.1/32" {
+					t.Fatalf("TrustedProxyCIDRs = %v, want both ranges", cfg.TrustedProxyCIDRs)
+				}
 			},
 		},
 		{
@@ -217,6 +228,11 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 			name:      "dstack customer token mode must be set",
 			overrides: map[string]string{"DSTACK_CUSTOMER_TOKEN_MODE": ""},
 			wantError: "DSTACK_CUSTOMER_TOKEN_MODE must be admin_refresh",
+		},
+		{
+			name:      "trusted proxies must be CIDR ranges",
+			overrides: map[string]string{"TRUSTED_PROXY_CIDRS": "10.0.0.1"},
+			wantError: "TRUSTED_PROXY_CIDRS must contain only CIDR ranges",
 		},
 		{
 			name:      "smtp tls verification must be enabled",

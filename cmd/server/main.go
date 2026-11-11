@@ -56,7 +56,7 @@ func main() {
 	go runProviderBackendSync(ctx, provisioner)
 	go runUsageReconciler(ctx, tenantService, reconciler)
 	go runPaymentReconciler(ctx, paymentService)
-	api := &httpapi.Server{Identity: identityService, Keys: keyService, Ledger: ledgerService, Meter: reconciler.Meter, Tenants: tenantService, Payments: paymentService, Pricing: priceService, DStack: proxy, PaymentServerKey: cfg.MidtransServerKey}
+	api := &httpapi.Server{Identity: identityService, Keys: keyService, Ledger: ledgerService, Meter: reconciler.Meter, Tenants: tenantService, Payments: paymentService, Pricing: priceService, DStack: proxy, PaymentServerKey: cfg.MidtransServerKey, TrustedProxies: cfg.TrustedProxyCIDRs}
 	server := &http.Server{Addr: cfg.ListenAddr, Handler: api.Router(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 60 * time.Second}
 	stopped := make(chan os.Signal, 1)
 	signal.Notify(stopped, syscall.SIGINT, syscall.SIGTERM)

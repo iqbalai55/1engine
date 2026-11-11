@@ -35,6 +35,7 @@ type Server struct {
 	DStack           *dstack.Proxy
 	PaymentServerKey string
 	Limiter          *requestLimiter
+	TrustedProxies   []string
 }
 
 type identityService interface {
@@ -97,6 +98,9 @@ func (s *Server) Router() *gin.Engine {
 		s.Limiter = newRequestLimiter()
 	}
 	r := gin.New()
+	if err := r.SetTrustedProxies(s.TrustedProxies); err != nil {
+		panic(err)
+	}
 	r.Use(gin.Recovery())
 	v1 := r.Group("/v1")
 	v1.POST("/signup", s.rateLimit("signup", 5, time.Hour), s.signup)
@@ -114,7 +118,7 @@ func (s *Server) Router() *gin.Engine {
 	portal.GET("/api-keys", s.listKeys)
 	portal.POST("/api-keys/:id/rotate", s.rateLimit("key-issue", 10, time.Hour), s.rotateKey)
 	portal.DELETE("/api-keys/:id", s.revokeKey)
-	portal.POST("/credit-purchases", s.createPurchase)
+	portal.POST("/credit-purchases", s.rateLimitBy("purchase", 10, time.Hour, tenantKey), s.createPurchase)
 	provider := v1.Group("/provider", s.authenticate(false), s.providerOnly())
 	provider.GET("/tenants", s.providerTenants)
 	provider.PATCH("/tenants/:id/markup", s.setMarkup)
@@ -122,16 +126,24 @@ func (s *Server) Router() *gin.Engine {
 	provider.GET("/price", s.getPrice)
 	provider.PUT("/price", s.setPrice)
 	v1.POST("/payments/midtrans/notification", s.notification)
-	proxy := v1.Group("/dstack", s.authenticate(true))
+	proxy := v1.Group("/dstack", s.authenticate(true), s.rateLimitBy("proxy", 300, time.Minute, tenantKey))
 	proxy.Any("/*path", s.proxyDStack)
-	proxyAPI := v1.Group("/api", s.authenticate(true))
+	proxyAPI := v1.Group("/api", s.authenticate(true), s.rateLimitBy("proxy", 300, time.Minute, tenantKey))
 	proxyAPI.Any("/*path", s.proxyDStack)
 	return r
 }
 
 func (s *Server) rateLimit(action string, limit int, window time.Duration) gin.HandlerFunc {
+	return s.rateLimitBy(action, limit, window, func(c *gin.Context) string { return c.ClientIP() })
+}
+
+func tenantKey(c *gin.Context) string {
+	return string(mustPrincipal(c).TenantID)
+}
+
+func (s *Server) rateLimitBy(action string, limit int, window time.Duration, subject func(*gin.Context) string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		key := action + ":" + c.ClientIP()
+		key := action + ":" + subject(c)
 		if !s.Limiter.Allow(key, limit, window, time.Now()) {
 			c.Header("Retry-After", strconv.Itoa(int(window.Seconds())))
 			respondError(c, http.StatusTooManyRequests, errors.New("too many requests"))
@@ -187,6 +199,12 @@ func (s *Server) login(c *gin.Context) {
 	}
 	if err := decode(c, &req); err != nil {
 		respondError(c, 400, errors.New("invalid request body"))
+		return
+	}
+	account := "login-account:" + strings.ToLower(strings.TrimSpace(req.Email))
+	if !s.Limiter.Allow(account, 10, 15*time.Minute, time.Now()) {
+		c.Header("Retry-After", strconv.Itoa(int((15 * time.Minute).Seconds())))
+		respondError(c, http.StatusTooManyRequests, errors.New("too many requests"))
 		return
 	}
 	session, err := s.Identity.Login(c, req.Email, req.Password)

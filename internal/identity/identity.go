@@ -121,6 +121,9 @@ func hashPassword(password string) (string, error) {
 	return "$argon2id$v=19$m=65536,t=3,p=2$" + base64.RawStdEncoding.EncodeToString(salt) + "$" + base64.RawStdEncoding.EncodeToString(hash), nil
 }
 
+// timingDummyHash makes logins for unknown or unverified accounts run the same argon2 work as real ones.
+var timingDummyHash, _ = hashPassword("timing-equalizer-password")
+
 func verifyPassword(encoded, password string) bool {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" {
@@ -236,7 +239,11 @@ func (s *Service) Login(ctx context.Context, email, password string) (Session, e
 	var userID, encoded string
 	var verified *time.Time
 	err := s.DB.QueryRow(ctx, `SELECT id,password_hash,email_verified_at FROM users WHERE email=$1`, strings.ToLower(strings.TrimSpace(email))).Scan(&userID, &encoded, &verified)
-	if err != nil || verified == nil || !verifyPassword(encoded, password) {
+	if err != nil {
+		encoded = timingDummyHash
+	}
+	passwordMatches := verifyPassword(encoded, password)
+	if err != nil || verified == nil || !passwordMatches {
 		return Session{}, errors.New("invalid email or password")
 	}
 	token, tokenHash, err := NewToken()

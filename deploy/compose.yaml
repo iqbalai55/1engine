@@ -144,6 +144,7 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:?set SMTP_PASSWORD in .env}
       SMTP_FROM: ${SMTP_FROM:?set SMTP_FROM in .env}
       SMTP_VERIFY_TLS: "true"
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
       SSL_CERT_FILE: /trust/ca-bundle.pem
     volumes:
       - trust:/trust:ro
