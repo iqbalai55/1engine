@@ -84,11 +84,10 @@ type Service struct {
 	Accounts      CreditAccountOpener
 	SessionTTL    time.Duration
 	SessionSecret []byte
-	DefaultServer string
 }
 
 type TenantRegistrar interface {
-	CreateForOwner(context.Context, store.Querier, domain.UserID, string, string, string) (domain.TenantID, error)
+	CreateForOwner(context.Context, store.Querier, domain.UserID, string, string) (domain.TenantID, error)
 }
 
 type CreditAccountOpener interface {
@@ -217,11 +216,7 @@ func (s *Service) VerifyEmail(ctx context.Context, token string) (string, error)
 		return "", err
 	}
 	suffix := base64.RawURLEncoding.EncodeToString(nonce[:])
-	server := s.DefaultServer
-	if server == "" {
-		server = "default"
-	}
-	tenantID, err := s.Tenants.CreateForOwner(ctx, tx, domain.UserID(userID), "tenant-"+suffix, "project-"+suffix, server)
+	tenantID, err := s.Tenants.CreateForOwner(ctx, tx, domain.UserID(userID), "tenant-"+suffix, "project-"+suffix)
 	if err != nil {
 		return "", err
 	}

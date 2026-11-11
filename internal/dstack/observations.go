@@ -18,7 +18,7 @@ import (
 )
 
 type ObservationCredentials interface {
-	CustomerCredential(context.Context, domain.TenantID, string, []byte) (string, error)
+	CustomerCredential(context.Context, domain.TenantID, []byte) (string, error)
 }
 
 type ObservationTenantSource interface {
@@ -26,7 +26,7 @@ type ObservationTenantSource interface {
 }
 
 type ObservationClient struct {
-	Servers       Servers
+	BaseURL       string
 	Credentials   ObservationCredentials
 	Tenants       ObservationTenantSource
 	EncryptionKey []byte
@@ -50,11 +50,7 @@ func (c *ObservationClient) listTenantObservations(ctx context.Context, tenant d
 	if err != nil || binding.DStack.Provision != domain.ProvisionReady {
 		return compute.ObservationPage{}, domain.ErrTenantUnavailable
 	}
-	server, ok := c.Servers.Get(binding.DStack.Server)
-	if !ok {
-		return compute.ObservationPage{}, domain.ErrTenantUnavailable
-	}
-	credential, err := c.Credentials.CustomerCredential(ctx, tenant, server.Name, c.EncryptionKey)
+	credential, err := c.Credentials.CustomerCredential(ctx, tenant, c.EncryptionKey)
 	if err != nil || credential == "" {
 		return compute.ObservationPage{}, domain.ErrTenantUnavailable
 	}
@@ -65,7 +61,7 @@ func (c *ObservationClient) listTenantObservations(ctx context.Context, tenant d
 	case "runs":
 		path, timeField, idField = "/api/runs/list", "prev_submitted_at", "prev_run_id"
 		body["project_name"] = string(binding.DStack.Project)
-		body["username"] = dstackAccountUsername(binding.DStack)
+		body["username"] = binding.DStack.Username
 	case "instances":
 		path, timeField, idField = "/api/instances/list", "prev_created_at", "prev_id"
 		body["project_names"] = []string{string(binding.DStack.Project)}
@@ -91,7 +87,7 @@ func (c *ObservationClient) listTenantObservations(ctx context.Context, tenant d
 	if err != nil {
 		return compute.ObservationPage{}, err
 	}
-	base, err := url.Parse(server.URL)
+	base, err := url.Parse(c.BaseURL)
 	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil {
 		return compute.ObservationPage{}, errors.New("dstack endpoint must be an absolute HTTPS URL")
 	}
