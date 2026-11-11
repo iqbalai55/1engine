@@ -40,15 +40,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	var mailer identity.Mailer = identity.SMTPMailer{Host: cfg.SMTPHost, Port: os.Getenv("SMTP_PORT"), Username: cfg.SMTPUser, Password: cfg.SMTPPassword, From: cfg.SMTPFrom, PublicBaseURL: cfg.PublicBaseURL}
-	if cfg.EmailDelivery == "log" {
-		mailer = identity.LogMailer{PublicBaseURL: cfg.PublicBaseURL}
-	}
 	keyService := &apikey.Service{DB: db.Pool}
 	tenantService := &tenant.Service{DB: db.Pool}
 	priceService := &pricing.Service{DB: db.Pool}
 	ledgerService := &ledger.Service{DB: db.Pool, Prices: priceService, Admission: tenantService}
-	identityService := &identity.Service{DB: db.Pool, Mailer: mailer, Tenants: tenantService, Accounts: ledgerService, SessionTTL: 24 * time.Hour, SessionSecret: cfg.SessionSecret}
+	googleOAuth := identity.NewGoogleOAuthClient(cfg.GoogleClientID, cfg.GoogleClientSecret, cfg.GoogleRedirectURL)
+	identityService := &identity.Service{DB: db.Pool, Google: googleOAuth, Tenants: tenantService, Accounts: ledgerService, SessionTTL: 24 * time.Hour, SessionSecret: cfg.SessionSecret}
 	snap := payments.SnapClient{Config: payments.SnapConfig{ServerKey: cfg.MidtransServerKey, ClientKey: cfg.MidtransClientKey, BaseURL: cfg.MidtransBaseURL, StatusURL: cfg.MidtransStatusURL, Environment: cfg.MidtransEnvironment, PublicBaseURL: cfg.PublicBaseURL}}
 	paymentService := &payments.Service{DB: db.Pool, Ledger: ledgerService, Snap: snap}
 	proxy := dstack.NewProxy(cfg.DStackURL, tenantService, cfg.EncryptionKey, ledgerService)

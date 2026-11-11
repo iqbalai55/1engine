@@ -5,98 +5,21 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
-	"crypto/tls"
 	"encoding/base64"
 	"errors"
-	"fmt"
-	"log"
-	"net"
-	"net/smtp"
-	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"billing-backend/internal/domain"
 	"billing-backend/internal/store"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/crypto/argon2"
 )
-
-type Mailer interface {
-	SendVerification(ctx context.Context, email, token string) error
-}
-
-// LogMailer writes the verification link to the service log instead of sending it.
-// Use it for development only: anyone who can read the logs can verify an address.
-type LogMailer struct{ PublicBaseURL string }
-
-func (m LogMailer) SendVerification(ctx context.Context, email, token string) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	link := strings.TrimRight(m.PublicBaseURL, "/") + "/verify-email?token=" + url.QueryEscape(token)
-	log.Printf("verification link for %s: %s", email, link)
-	return nil
-}
-
-type SMTPMailer struct {
-	Host          string
-	Port          string
-	Username      string
-	Password      string
-	From          string
-	PublicBaseURL string
-}
-
-func (m SMTPMailer) SendVerification(ctx context.Context, email, token string) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	link := strings.TrimRight(m.PublicBaseURL, "/") + "/verify-email?token=" + url.QueryEscape(token)
-	body := []byte("To: " + email + "\r\nSubject: Verify your account\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nOpen this link to verify your account:\r\n" + link + "\r\n")
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", net.JoinHostPort(m.Host, m.Port), &tls.Config{ServerName: m.Host, MinVersion: tls.VersionTLS12})
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	client, err := smtp.NewClient(conn, m.Host)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-	if err = client.Auth(smtp.PlainAuth("", m.Username, m.Password, m.Host)); err != nil {
-		return err
-	}
-	if err = client.Mail(m.From); err != nil {
-		return err
-	}
-	if err = client.Rcpt(email); err != nil {
-		return err
-	}
-	writer, err := client.Data()
-	if err != nil {
-		return err
-	}
-	if _, err = writer.Write(body); err != nil {
-		return err
-	}
-	if err = writer.Close(); err != nil {
-		return err
-	}
-	if err = client.Quit(); err != nil {
-		return fmt.Errorf("SMTP delivery completion failed: %w", err)
-	}
-	return nil
-}
 
 type Service struct {
 	DB            *pgxpool.Pool
-	Mailer        Mailer
+	Google        GoogleOAuth
 	Tenants       TenantRegistrar
 	Accounts      CreditAccountOpener
 	SessionTTL    time.Duration
@@ -104,17 +27,20 @@ type Service struct {
 }
 
 type TenantRegistrar interface {
-	CreateForOwner(context.Context, store.Querier, domain.UserID, string, string) (domain.TenantID, error)
+	EnsureForOwner(context.Context, store.Querier, domain.UserID, string, string) (domain.TenantID, error)
 }
 
 type CreditAccountOpener interface {
 	OpenAccount(context.Context, store.Querier, domain.TenantID) error
 }
+
 type Session struct {
 	Token     string
 	UserID    string
 	ExpiresAt time.Time
 }
+
+const googleStateTTL = 10 * time.Minute
 
 func NewToken() (string, []byte, error) {
 	buf := make([]byte, 32)
@@ -126,142 +52,140 @@ func NewToken() (string, []byte, error) {
 	return token, h[:], nil
 }
 
-func hashPassword(password string) (string, error) {
-	if len(password) < 12 || len(password) > 1024 {
-		return "", errors.New("password must contain 12 to 1024 bytes")
+// StartGoogle returns the Google authorization URL and the signed state that
+// binds the browser to the callback.
+func (s *Service) StartGoogle() (string, string, error) {
+	if s.Google == nil {
+		return "", "", errors.New("google sign-in is unavailable")
 	}
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", err
+	state, err := s.signState()
+	if err != nil {
+		return "", "", err
 	}
-	hash := argon2.IDKey([]byte(password), salt, 3, 64*1024, 2, 32)
-	return "$argon2id$v=19$m=65536,t=3,p=2$" + base64.RawStdEncoding.EncodeToString(salt) + "$" + base64.RawStdEncoding.EncodeToString(hash), nil
+	return s.Google.AuthURL(state), state, nil
 }
 
-// timingDummyHash makes logins for unknown or unverified accounts run the same argon2 work as real ones.
-var timingDummyHash, _ = hashPassword("timing-equalizer-password")
-
-func verifyPassword(encoded, password string) bool {
-	parts := strings.Split(encoded, "$")
-	if len(parts) != 6 || parts[1] != "argon2id" {
-		return false
+func (s *Service) CompleteGoogle(ctx context.Context, code, state string) (Session, error) {
+	if s.Google == nil {
+		return Session{}, errors.New("google sign-in is unavailable")
 	}
-	salt, e1 := base64.RawStdEncoding.DecodeString(parts[4])
-	want, e2 := base64.RawStdEncoding.DecodeString(parts[5])
-	if e1 != nil || e2 != nil {
-		return false
+	if err := s.verifyState(state); err != nil {
+		return Session{}, err
 	}
-	got := argon2.IDKey([]byte(password), salt, 3, 64*1024, 2, uint32(len(want)))
-	if len(got) != len(want) {
-		return false
-	}
-	return subtle.ConstantTimeCompare(got, want) == 1
-}
-
-func (s *Service) SignUp(ctx context.Context, email, password string) error {
-	email = strings.ToLower(strings.TrimSpace(email))
-	if !validEmail(email) {
-		return errors.New("invalid email")
-	}
-	if s.Mailer == nil {
-		return errors.New("verification email delivery is unavailable")
-	}
-	passwordHash, err := hashPassword(password)
+	identity, err := s.Google.Exchange(ctx, code)
 	if err != nil {
-		return err
-	}
-	token, tokenHash, err := NewToken()
-	if err != nil {
-		return err
+		return Session{}, err
 	}
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
-		return err
+		return Session{}, err
 	}
 	defer tx.Rollback(ctx)
-	var userID string
-	err = tx.QueryRow(ctx, `INSERT INTO users(email,password_hash) VALUES($1,$2) ON CONFLICT(email) DO UPDATE SET password_hash=EXCLUDED.password_hash WHERE users.email_verified_at IS NULL RETURNING id`, email, passwordHash).Scan(&userID)
+	userID, err := linkGoogleUser(ctx, tx, identity)
 	if err != nil {
-		return errors.New("email already registered")
+		return Session{}, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO verification_challenges(user_id,token_hash,expires_at) VALUES($1,$2,$3) ON CONFLICT(user_id) DO UPDATE SET token_hash=EXCLUDED.token_hash,expires_at=EXCLUDED.expires_at,consumed_at=NULL`, userID, tokenHash, time.Now().Add(30*time.Minute))
+	suffix, err := randomSuffix()
 	if err != nil {
-		return err
+		return Session{}, err
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return err
-	}
-	return s.Mailer.SendVerification(ctx, email, token)
-}
-
-func validEmail(email string) bool {
-	if len(email) > 320 {
-		return false
-	}
-	parts := strings.Split(email, "@")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || !strings.Contains(parts[1], ".") {
-		return false
-	}
-	for _, r := range email {
-		if r < 33 || r > 126 {
-			return false
-		}
-	}
-	return true
-}
-
-func (s *Service) VerifyEmail(ctx context.Context, token string) (string, error) {
-	h := sha256.Sum256([]byte(token))
-	tx, err := s.DB.Begin(ctx)
+	tenantID, err := s.Tenants.EnsureForOwner(ctx, tx, domain.UserID(userID), "tenant-"+suffix, "project-"+suffix)
 	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback(ctx)
-	var userID string
-	err = tx.QueryRow(ctx, `SELECT user_id FROM verification_challenges WHERE token_hash=$1 AND consumed_at IS NULL AND expires_at>now() FOR UPDATE`, h[:]).Scan(&userID)
-	if err != nil {
-		return "", errors.New("verification token is invalid or expired")
-	}
-	if _, err = tx.Exec(ctx, `UPDATE verification_challenges SET consumed_at=now() WHERE user_id=$1`, userID); err != nil {
-		return "", err
-	}
-	if _, err = tx.Exec(ctx, `UPDATE users SET email_verified_at=COALESCE(email_verified_at,now()) WHERE id=$1`, userID); err != nil {
-		return "", err
-	}
-	var nonce [8]byte
-	if _, err = rand.Read(nonce[:]); err != nil {
-		return "", err
-	}
-	suffix := base64.RawURLEncoding.EncodeToString(nonce[:])
-	tenantID, err := s.Tenants.CreateForOwner(ctx, tx, domain.UserID(userID), "tenant-"+suffix, "project-"+suffix)
-	if err != nil {
-		return "", err
+		return Session{}, err
 	}
 	if tenantID == "" {
-		return "", errors.New("tenant activation did not return a tenant")
+		return Session{}, errors.New("tenant activation did not return a tenant")
 	}
-	if err = s.Accounts.OpenAccount(ctx, tx, tenantID); err != nil {
-		return "", err
+	if err := s.Accounts.OpenAccount(ctx, tx, tenantID); err != nil {
+		return Session{}, err
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return "", err
+	if err := tx.Commit(ctx); err != nil {
+		return Session{}, err
 	}
-	return userID, nil
+	return s.issueSession(ctx, userID)
 }
 
-func (s *Service) Login(ctx context.Context, email, password string) (Session, error) {
+func (s *Service) signState() (string, error) {
+	if len(s.SessionSecret) < 32 {
+		return "", errors.New("portal session signing secret is unavailable")
+	}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	payload := base64.RawURLEncoding.EncodeToString(nonce) + "." + strconv.FormatInt(time.Now().UTC().Unix(), 10)
+	mac := hmac.New(sha256.New, s.SessionSecret)
+	_, _ = mac.Write([]byte(payload))
+	return payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+func (s *Service) verifyState(state string) error {
+	if len(s.SessionSecret) < 32 {
+		return errors.New("portal session signing secret is unavailable")
+	}
+	parts := strings.Split(state, ".")
+	if len(parts) != 3 {
+		return errors.New("google sign-in state is invalid")
+	}
+	payload := parts[0] + "." + parts[1]
+	mac := hmac.New(sha256.New, s.SessionSecret)
+	_, _ = mac.Write([]byte(payload))
+	expected := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(expected), []byte(parts[2])) {
+		return errors.New("google sign-in state is invalid")
+	}
+	issued, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return errors.New("google sign-in state is invalid")
+	}
+	age := time.Since(time.Unix(issued, 0))
+	if age < -time.Minute || age > googleStateTTL {
+		return errors.New("google sign-in state has expired")
+	}
+	return nil
+}
+
+func linkGoogleUser(ctx context.Context, tx store.Querier, google GoogleIdentity) (string, error) {
+	var userID string
+	err := tx.QueryRow(ctx, `SELECT id FROM users WHERE google_subject=$1 FOR UPDATE`, google.Subject).Scan(&userID)
+	if err == nil {
+		if _, err := tx.Exec(ctx, `UPDATE users SET email_verified_at=COALESCE(email_verified_at,now()) WHERE id=$1`, userID); err != nil {
+			return "", err
+		}
+		return userID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+	err = tx.QueryRow(ctx, `SELECT id FROM users WHERE email=$1 FOR UPDATE`, google.Email).Scan(&userID)
+	if err == nil {
+		tag, err := tx.Exec(ctx, `UPDATE users SET google_subject=$2, email_verified_at=COALESCE(email_verified_at,now()) WHERE id=$1 AND google_subject IS NULL`, userID, google.Subject)
+		if err != nil {
+			return "", err
+		}
+		if tag.RowsAffected() == 0 {
+			return "", errors.New("this email is already linked to another Google account")
+		}
+		return userID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+	err = tx.QueryRow(ctx, `INSERT INTO users(email,google_subject,email_verified_at) VALUES($1,$2,now()) RETURNING id`, google.Email, google.Subject).Scan(&userID)
+	return userID, err
+}
+
+func randomSuffix() (string, error) {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func (s *Service) issueSession(ctx context.Context, userID string) (Session, error) {
 	if len(s.SessionSecret) < 32 {
 		return Session{}, errors.New("portal session signing secret is unavailable")
-	}
-	var userID, encoded string
-	var verified *time.Time
-	err := s.DB.QueryRow(ctx, `SELECT id,password_hash,email_verified_at FROM users WHERE email=$1`, strings.ToLower(strings.TrimSpace(email))).Scan(&userID, &encoded, &verified)
-	if err != nil {
-		encoded = timingDummyHash
-	}
-	passwordMatches := verifyPassword(encoded, password)
-	if err != nil || verified == nil || !passwordMatches {
-		return Session{}, errors.New("invalid email or password")
 	}
 	token, tokenHash, err := NewToken()
 	if err != nil {

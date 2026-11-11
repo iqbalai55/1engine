@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -25,13 +24,9 @@ type Config struct {
 	MidtransEnvironment  string
 	PublicBaseURL        string
 	TrustedProxyCIDRs    []string
-	SMTPHost             string
-	SMTPPort             int
-	SMTPUser             string
-	SMTPPassword         string
-	SMTPFrom             string
-	EmailDelivery        string
-	VerifyTLS            bool
+	GoogleClientID       string
+	GoogleClientSecret   string
+	GoogleRedirectURL    string
 }
 
 func Load() (Config, error) {
@@ -50,11 +45,9 @@ func Load() (Config, error) {
 		MidtransStatusURL:    os.Getenv("MIDTRANS_STATUS_URL"),
 		MidtransEnvironment:  os.Getenv("MIDTRANS_ENVIRONMENT"),
 		PublicBaseURL:        os.Getenv("PUBLIC_BASE_URL"),
-		SMTPHost:             os.Getenv("SMTP_HOST"),
-		SMTPUser:             os.Getenv("SMTP_USER"),
-		SMTPPassword:         os.Getenv("SMTP_PASSWORD"),
-		SMTPFrom:             os.Getenv("SMTP_FROM"),
-		EmailDelivery:        os.Getenv("EMAIL_DELIVERY"),
+		GoogleClientID:       os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:   os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GoogleRedirectURL:    os.Getenv("GOOGLE_REDIRECT_URL"),
 	}
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = ":8080"
@@ -75,30 +68,6 @@ func Load() (Config, error) {
 		}
 		cfg.TrustedProxyCIDRs = append(cfg.TrustedProxyCIDRs, cidr)
 	}
-	if cfg.EmailDelivery == "" {
-		cfg.EmailDelivery = "smtp"
-	}
-	switch cfg.EmailDelivery {
-	case "smtp":
-		if cfg.VerifyTLS, _ = strconv.ParseBool(os.Getenv("SMTP_VERIFY_TLS")); !cfg.VerifyTLS {
-			return Config{}, errors.New("SMTP_VERIFY_TLS must be true")
-		}
-		port := os.Getenv("SMTP_PORT")
-		if port == "" {
-			return Config{}, errors.New("SMTP_PORT is required")
-		}
-		var err error
-		cfg.SMTPPort, err = strconv.Atoi(port)
-		if err != nil || cfg.SMTPPort < 1 || cfg.SMTPPort > 65535 {
-			return Config{}, errors.New("SMTP_PORT must be a valid port")
-		}
-		if cfg.SMTPPort != 465 {
-			return Config{}, errors.New("SMTP_PORT must use implicit TLS on port 465")
-		}
-	case "log":
-	default:
-		return Config{}, errors.New("EMAIL_DELIVERY must be smtp or log")
-	}
 	checks := map[string]string{
 		"DATABASE_URL":          cfg.DatabaseURL,
 		"SESSION_SECRET":        string(cfg.SessionSecret),
@@ -108,12 +77,9 @@ func Load() (Config, error) {
 		"MIDTRANS_SERVER_KEY":   cfg.MidtransServerKey,
 		"MIDTRANS_CLIENT_KEY":   cfg.MidtransClientKey,
 		"PUBLIC_BASE_URL":       cfg.PublicBaseURL,
-	}
-	if cfg.EmailDelivery == "smtp" {
-		checks["SMTP_HOST"] = cfg.SMTPHost
-		checks["SMTP_USER"] = cfg.SMTPUser
-		checks["SMTP_PASSWORD"] = cfg.SMTPPassword
-		checks["SMTP_FROM"] = cfg.SMTPFrom
+		"GOOGLE_CLIENT_ID":      cfg.GoogleClientID,
+		"GOOGLE_CLIENT_SECRET":  cfg.GoogleClientSecret,
+		"GOOGLE_REDIRECT_URL":   cfg.GoogleRedirectURL,
 	}
 	for name, value := range checks {
 		if value == "" {
@@ -144,15 +110,6 @@ func Load() (Config, error) {
 	if err != nil || publicURL.Host == "" {
 		return Config{}, errors.New("PUBLIC_BASE_URL must be an absolute HTTPS URL")
 	}
-	for name, value := range map[string]string{"DSTACK_URL": cfg.DStackURL} {
-		parsed, err := url.Parse(value)
-		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
-			return Config{}, errors.New(name + " must be an HTTPS URL")
-		}
-	}
-	if cfg.SMTPPort != 0 && cfg.SMTPPort != 465 {
-		return Config{}, errors.New("SMTP_PORT must use implicit TLS on port 465")
-	}
 	if len(cfg.EncryptionKey) != 32 {
 		return Config{}, errors.New("DSTACK_ENCRYPTION_KEY must contain exactly 32 bytes")
 	}
@@ -162,9 +119,14 @@ func Load() (Config, error) {
 	if cfg.MidtransEnvironment != "sandbox" && cfg.MidtransEnvironment != "production" {
 		return Config{}, errors.New("MIDTRANS_ENVIRONMENT must be sandbox or production")
 	}
-	for name, value := range map[string]string{"MIDTRANS_BASE_URL": cfg.MidtransBaseURL, "MIDTRANS_STATUS_URL": cfg.MidtransStatusURL} {
+	for name, value := range map[string]string{
+		"DSTACK_URL":          cfg.DStackURL,
+		"MIDTRANS_BASE_URL":   cfg.MidtransBaseURL,
+		"MIDTRANS_STATUS_URL": cfg.MidtransStatusURL,
+		"GOOGLE_REDIRECT_URL": cfg.GoogleRedirectURL,
+	} {
 		parsed, err := url.Parse(value)
-		if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
 			return Config{}, errors.New(name + " must be an HTTPS URL")
 		}
 	}

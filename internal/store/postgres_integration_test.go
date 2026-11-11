@@ -25,6 +25,14 @@ func (failingAccountOpener) OpenAccount(context.Context, store.Querier, domain.T
 	return errors.New("forced account opening failure")
 }
 
+type staticGoogle struct{ account identity.GoogleIdentity }
+
+func (staticGoogle) AuthURL(string) string { return "https://accounts.google.com/o/oauth2/v2/auth" }
+
+func (g staticGoogle) Exchange(context.Context, string) (identity.GoogleIdentity, error) {
+	return g.account, nil
+}
+
 func TestConcurrentIdempotentLedgerPosting(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
@@ -166,7 +174,7 @@ func TestConcurrentIdempotentLedgerPosting(t *testing.T) {
 	}
 }
 
-func TestEmailVerificationCreatesTenantAndCreditAccountAtomically(t *testing.T) {
+func TestGoogleSignInCreatesTenantAndCreditAccountAtomically(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("TEST_DATABASE_URL is unset")
@@ -180,51 +188,62 @@ func TestEmailVerificationCreatesTenantAndCreditAccountAtomically(t *testing.T) 
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var userID string
-	var tokenHash []byte
-	var token string
-	token, tokenHash, err = identity.NewToken()
+	nonce, _, err := identity.NewToken()
 	if err != nil {
 		t.Fatal(err)
 	}
-	email := fmt.Sprintf("verify-%d-%s@example.test", os.Getpid(), token)
-	if err := db.Pool.QueryRow(ctx, `INSERT INTO users(email,password_hash) VALUES($1,'test') RETURNING id`, email).Scan(&userID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Pool.Exec(ctx, `INSERT INTO verification_challenges(user_id,token_hash,expires_at) VALUES($1,$2,now()+interval '30 minutes')`, userID, tokenHash); err != nil {
-		t.Fatal(err)
-	}
+	email := fmt.Sprintf("google-%d-%s@example.test", os.Getpid(), nonce)
+	subject := "google-subject-" + nonce
 	defer func() {
-		_, _ = db.Pool.Exec(ctx, `DELETE FROM credit_accounts WHERE tenant_id IN (SELECT id FROM tenants WHERE owner_user_id=$1)`, userID)
-		_, _ = db.Pool.Exec(ctx, `DELETE FROM tenants WHERE owner_user_id=$1`, userID)
-		_, _ = db.Pool.Exec(ctx, `DELETE FROM verification_challenges WHERE user_id=$1`, userID)
-		_, _ = db.Pool.Exec(ctx, `DELETE FROM users WHERE id=$1`, userID)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM portal_sessions WHERE user_id IN (SELECT id FROM users WHERE email=$1)`, email)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM credit_accounts WHERE tenant_id IN (SELECT id FROM tenants WHERE owner_user_id IN (SELECT id FROM users WHERE email=$1))`, email)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM tenants WHERE owner_user_id IN (SELECT id FROM users WHERE email=$1)`, email)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM users WHERE email=$1`, email)
 	}()
-	tenants := &tenancy.Service{DB: db.Pool}
-	accounts := &ledger.Service{DB: db.Pool}
-	service := identity.Service{DB: db.Pool, Tenants: tenants, Accounts: accounts}
-	verifiedUser, err := service.VerifyEmail(ctx, token)
+	service := identity.Service{
+		DB:            db.Pool,
+		Google:        staticGoogle{account: identity.GoogleIdentity{Subject: subject, Email: email}},
+		Tenants:       &tenancy.Service{DB: db.Pool},
+		Accounts:      &ledger.Service{DB: db.Pool},
+		SessionSecret: []byte("0123456789abcdef0123456789abcdef"),
+		SessionTTL:    time.Hour,
+	}
+	_, state, err := service.StartGoogle()
 	if err != nil {
 		t.Fatal(err)
+	}
+	session, err := service.CompleteGoogle(ctx, "authorization-code", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Token == "" || session.UserID == "" {
+		t.Fatal("google sign-in returned an incomplete session")
+	}
+	var userID string
+	if err := db.Pool.QueryRow(ctx, `SELECT id FROM users WHERE google_subject=$1`, subject).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if userID != session.UserID {
+		t.Fatalf("session user = %q, stored user = %q", session.UserID, userID)
 	}
 	var tenantID string
-	var state string
-	if err := db.Pool.QueryRow(ctx, `SELECT id,state FROM tenants WHERE owner_user_id=$1`, verifiedUser).Scan(&tenantID, &state); err != nil {
+	var tenantState string
+	if err := db.Pool.QueryRow(ctx, `SELECT id,state FROM tenants WHERE owner_user_id=$1`, userID).Scan(&tenantID, &tenantState); err != nil {
 		t.Fatal(err)
 	}
-	if state != "provisioning" {
-		t.Fatalf("verified tenant state = %q, want provisioning", state)
+	if tenantState != "provisioning" {
+		t.Fatalf("signed-in tenant state = %q, want provisioning", tenantState)
 	}
 	var accountsCount int
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM credit_accounts WHERE tenant_id=$1`, tenantID).Scan(&accountsCount); err != nil {
 		t.Fatal(err)
 	}
 	if accountsCount != 1 {
-		t.Fatalf("verified account count = %d, want one", accountsCount)
+		t.Fatalf("signed-in account count = %d, want one", accountsCount)
 	}
 }
 
-func TestEmailVerificationRollsBackTenantWhenCreditAccountOpeningFails(t *testing.T) {
+func TestGoogleSignInRollsBackUserAndTenantWhenCreditAccountOpeningFails(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("TEST_DATABASE_URL is unset")
@@ -238,46 +257,35 @@ func TestEmailVerificationRollsBackTenantWhenCreditAccountOpeningFails(t *testin
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	token, tokenHash, err := identity.NewToken()
+	nonce, _, err := identity.NewToken()
 	if err != nil {
 		t.Fatal(err)
 	}
-	userID := ""
-	email := fmt.Sprintf("rollback-%d-%s@example.test", os.Getpid(), token)
-	if err := db.Pool.QueryRow(ctx, `INSERT INTO users(email,password_hash) VALUES($1,'test') RETURNING id`, email).Scan(&userID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Pool.Exec(ctx, `INSERT INTO verification_challenges(user_id,token_hash,expires_at) VALUES($1,$2,now()+interval '30 minutes')`, userID, tokenHash); err != nil {
-		t.Fatal(err)
-	}
+	email := fmt.Sprintf("google-rollback-%d-%s@example.test", os.Getpid(), nonce)
+	subject := "google-rollback-subject-" + nonce
 	defer func() {
-		_, _ = db.Pool.Exec(ctx, `DELETE FROM tenants WHERE owner_user_id=$1`, userID)
-		_, _ = db.Pool.Exec(ctx, `DELETE FROM verification_challenges WHERE user_id=$1`, userID)
-		_, _ = db.Pool.Exec(ctx, `DELETE FROM users WHERE id=$1`, userID)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM users WHERE email=$1`, email)
 	}()
-	service := identity.Service{DB: db.Pool, Tenants: &tenancy.Service{DB: db.Pool}, Accounts: failingAccountOpener{}}
-	if _, err := service.VerifyEmail(ctx, token); err == nil {
-		t.Fatal("verification succeeded after credit account opening failed")
+	service := identity.Service{
+		DB:            db.Pool,
+		Google:        staticGoogle{account: identity.GoogleIdentity{Subject: subject, Email: email}},
+		Tenants:       &tenancy.Service{DB: db.Pool},
+		Accounts:      failingAccountOpener{},
+		SessionSecret: []byte("0123456789abcdef0123456789abcdef"),
+		SessionTTL:    time.Hour,
 	}
-	var verifiedAt *time.Time
-	if err := db.Pool.QueryRow(ctx, `SELECT email_verified_at FROM users WHERE id=$1`, userID).Scan(&verifiedAt); err != nil {
+	_, state, err := service.StartGoogle()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if verifiedAt != nil {
-		t.Fatal("failed verification left the user verified")
+	if _, err := service.CompleteGoogle(ctx, "authorization-code", state); err == nil {
+		t.Fatal("sign-in succeeded after credit account opening failed")
 	}
-	var consumedAt *time.Time
-	if err := db.Pool.QueryRow(ctx, `SELECT consumed_at FROM verification_challenges WHERE user_id=$1`, userID).Scan(&consumedAt); err != nil {
+	var userCount int
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE google_subject=$1`, subject).Scan(&userCount); err != nil {
 		t.Fatal(err)
 	}
-	if consumedAt != nil {
-		t.Fatal("failed verification consumed the challenge")
-	}
-	var tenantCount int
-	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM tenants WHERE owner_user_id=$1`, userID).Scan(&tenantCount); err != nil {
-		t.Fatal(err)
-	}
-	if tenantCount != 0 {
-		t.Fatalf("failed verification left %d tenants", tenantCount)
+	if userCount != 0 {
+		t.Fatalf("failed sign-in left %d users", userCount)
 	}
 }

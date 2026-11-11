@@ -25,18 +25,18 @@ func (s *Service) StateAndMarkup(ctx context.Context, tx store.Querier, id domai
 	return markup, state, err
 }
 
-func (s *Service) CreateForOwner(ctx context.Context, tx store.Querier, owner domain.UserID, username, project string) (domain.TenantID, error) {
+// EnsureForOwner returns the owner's tenant, creating it when the account has
+// none.
+func (s *Service) EnsureForOwner(ctx context.Context, tx store.Querier, owner domain.UserID, username, project string) (domain.TenantID, error) {
 	var id domain.TenantID
 	err := tx.QueryRow(ctx, `INSERT INTO tenants(owner_user_id,dstack_username,dstack_project) VALUES($1,$2,$3) ON CONFLICT(owner_user_id) DO NOTHING RETURNING id`, string(owner), username, project).Scan(&id)
-	if err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return "", err
-		}
-		if err := tx.QueryRow(ctx, `SELECT id FROM tenants WHERE owner_user_id=$1`, string(owner)).Scan(&id); err != nil {
-			return "", err
-		}
+	if err == nil {
+		return id, nil
 	}
-	_, err = tx.Exec(ctx, `UPDATE tenants SET state='provisioning' WHERE owner_user_id=$1`, string(owner))
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+	err = tx.QueryRow(ctx, `SELECT id FROM tenants WHERE owner_user_id=$1`, string(owner)).Scan(&id)
 	return id, err
 }
 
