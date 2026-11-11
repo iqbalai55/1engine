@@ -15,12 +15,12 @@ import (
 )
 
 type identityStub struct {
-	signUpError error
-	email       string
-	password    string
-	signUpCalls int
-	loginCalls  int
-	loginError  error
+	startError    error
+	startCalls    int
+	completeError error
+	completeCalls int
+	code          string
+	state         string
 }
 
 type nextRecorder struct{ calls int }
@@ -30,20 +30,19 @@ func (n *nextRecorder) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *identityStub) SignUp(_ context.Context, email, password string) error {
-	s.signUpCalls++
-	s.email = email
-	s.password = password
-	return s.signUpError
+func (s *identityStub) StartGoogle() (string, string, error) {
+	s.startCalls++
+	if s.startError != nil {
+		return "", "", s.startError
+	}
+	return "https://accounts.google.com/o/oauth2/v2/auth", "signed-state", nil
 }
 
-func (*identityStub) VerifyEmail(context.Context, string) (string, error) {
-	return "", errors.New("unexpected VerifyEmail call")
-}
-
-func (s *identityStub) Login(context.Context, string, string) (identity.Session, error) {
-	s.loginCalls++
-	return identity.Session{Token: "session-token"}, s.loginError
+func (s *identityStub) CompleteGoogle(_ context.Context, code, state string) (identity.Session, error) {
+	s.completeCalls++
+	s.code = code
+	s.state = state
+	return identity.Session{Token: "session-token", UserID: "user-1"}, s.completeError
 }
 
 func (*identityStub) Authenticate(context.Context, string) (string, error) {
@@ -86,62 +85,6 @@ func TestRouterHealthAndProtectedRoutes(t *testing.T) {
 	router.ServeHTTP(customerProxy, httptest.NewRequest(http.MethodPost, "/v1/api/runs/list", nil))
 	if customerProxy.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated /v1/api status = %d, want 401", customerProxy.Code)
-	}
-}
-
-func TestSignupRejectsMalformedOrUnknownRequestFields(t *testing.T) {
-	identity := &identityStub{}
-	router := (&Server{Identity: identity}).Router()
-	for _, body := range []string{`{`, `{"email":"user@example.test","password":"long-enough-password","extra":true}`} {
-		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, "/v1/signup", strings.NewReader(body))
-		request.RemoteAddr = "192.0.2.10:1234"
-		router.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusBadRequest {
-			t.Errorf("signup body %q status = %d, want 400", body, recorder.Code)
-		}
-	}
-	if identity.signUpCalls != 0 {
-		t.Fatalf("malformed signup reached identity service %d times", identity.signUpCalls)
-	}
-}
-
-func TestSignupReturnsAcceptedAfterIdentityServiceAcceptsRequest(t *testing.T) {
-	identity := &identityStub{}
-	router := (&Server{Identity: identity}).Router()
-	request := httptest.NewRequest(http.MethodPost, "/v1/signup", strings.NewReader(`{"email":"user@example.test","password":"long-enough-password"}`))
-	request.RemoteAddr = "192.0.2.11:1234"
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusAccepted {
-		t.Fatalf("signup status = %d, want 202", recorder.Code)
-	}
-	if identity.email != "user@example.test" || identity.password != "long-enough-password" {
-		t.Fatalf("signup received (%q, %q), want submitted credentials", identity.email, identity.password)
-	}
-}
-
-func TestSignupReturnsBadRequestWhenIdentityServiceRejectsRequest(t *testing.T) {
-	identity := &identityStub{signUpError: errors.New("signup rejected")}
-	router := (&Server{Identity: identity}).Router()
-	request := httptest.NewRequest(http.MethodPost, "/v1/signup", strings.NewReader(`{"email":"user@example.test","password":"long-enough-password"}`))
-	request.RemoteAddr = "192.0.2.12:1234"
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("rejected signup status = %d, want 400", recorder.Code)
-	}
-}
-
-func TestLoginRateLimitAdvancesAllowedRequests(t *testing.T) {
-	identity := &identityStub{}
-	router := (&Server{Identity: identity}).Router()
-	request := httptest.NewRequest(http.MethodPost, "/v1/login", strings.NewReader(`{"email":"user@example.test","password":"long-enough-password"}`))
-	request.RemoteAddr = "192.0.2.21:1234"
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK || identity.loginCalls != 1 {
-		t.Fatalf("allowed login response = %d with %d identity calls, want 200 and one call", recorder.Code, identity.loginCalls)
 	}
 }
 
@@ -258,59 +201,134 @@ func TestRequestLimiterEnforcesLimitAndWindowExpiry(t *testing.T) {
 	}
 }
 
-func TestSignupRateLimitRejectsExcessRequests(t *testing.T) {
+func TestRemovedPasswordRoutesAreGone(t *testing.T) {
+	router := (&Server{}).Router()
+	for _, path := range []string{"/v1/signup", "/v1/login", "/v1/email-verifications/confirm"} {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`)))
+		if recorder.Code != http.StatusNotFound {
+			t.Errorf("removed route %s status = %d, want 404", path, recorder.Code)
+		}
+	}
+}
+
+func TestGoogleStartReturnsAuthorizationURL(t *testing.T) {
+	identity := &identityStub{}
+	router := (&Server{Identity: identity}).Router()
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/auth/google/start", nil))
+	if recorder.Code != http.StatusOK || identity.startCalls != 1 {
+		t.Fatalf("google start response = %d with %d identity calls, want 200 and one call", recorder.Code, identity.startCalls)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "accounts.google.com") || !strings.Contains(body, "signed-state") {
+		t.Fatalf("google start body = %q, want authorization URL and state", body)
+	}
+}
+
+func TestGoogleStartFailsClosedWithoutIdentity(t *testing.T) {
+	router := (&Server{Identity: &identityStub{startError: errors.New("google is not configured")}}).Router()
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/auth/google/start", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unavailable google start status = %d, want 503", recorder.Code)
+	}
+}
+
+func TestGoogleCallbackReturnsSession(t *testing.T) {
+	identity := &identityStub{}
+	router := (&Server{Identity: identity}).Router()
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/google/callback", strings.NewReader(`{"code":"code-1","state":"state-1"}`))
+	request.RemoteAddr = "192.0.2.21:1234"
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || identity.completeCalls != 1 {
+		t.Fatalf("google callback response = %d with %d identity calls, want 200 and one call", recorder.Code, identity.completeCalls)
+	}
+	if identity.code != "code-1" || identity.state != "state-1" {
+		t.Fatalf("google callback received (%q, %q), want the submitted code and state", identity.code, identity.state)
+	}
+	if !strings.Contains(recorder.Body.String(), "session-token") {
+		t.Fatalf("google callback body = %q, want the portal session", recorder.Body.String())
+	}
+}
+
+func TestGoogleCallbackRejectsMalformedBody(t *testing.T) {
+	identity := &identityStub{}
+	router := (&Server{Identity: identity}).Router()
+	for _, body := range []string{`{`, `{"code":"code-1","state":"state-1","extra":true}`} {
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/google/callback", strings.NewReader(body))
+		request.RemoteAddr = "192.0.2.22:1234"
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Errorf("google callback body %q status = %d, want 400", body, recorder.Code)
+		}
+	}
+	if identity.completeCalls != 0 {
+		t.Fatalf("malformed callback reached identity service %d times", identity.completeCalls)
+	}
+}
+
+func TestGoogleCallbackRejectsFailedExchange(t *testing.T) {
+	router := (&Server{Identity: &identityStub{completeError: errors.New("exchange rejected")}}).Router()
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/google/callback", strings.NewReader(`{"code":"code-1","state":"state-1"}`))
+	request.RemoteAddr = "192.0.2.23:1234"
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("failed google callback status = %d, want 401", recorder.Code)
+	}
+	if strings.Contains(recorder.Body.String(), "exchange rejected") {
+		t.Fatal("callback response leaked the identity failure detail")
+	}
+}
+
+func TestGoogleStartRateLimitRejectsExcessRequests(t *testing.T) {
 	limiter := newRequestLimiter()
-	for range 5 {
-		if !limiter.Allow("signup:192.0.2.10", 5, time.Hour, time.Now()) {
-			t.Fatal("failed to prepare full signup quota")
+	for range 60 {
+		if !limiter.Allow("google-start:192.0.2.10", 60, time.Minute, time.Now()) {
+			t.Fatal("failed to prepare full google start quota")
 		}
 	}
 	identity := &identityStub{}
 	router := (&Server{Limiter: limiter, Identity: identity}).Router()
-	request := httptest.NewRequest(http.MethodPost, "/v1/signup", strings.NewReader(`{"email":"user@example.test","password":"long-enough-password"}`))
+	request := httptest.NewRequest(http.MethodGet, "/v1/auth/google/start", nil)
 	request.RemoteAddr = "192.0.2.10:1234"
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("excess signup status = %d, want 429", recorder.Code)
+		t.Fatalf("excess google start status = %d, want 429", recorder.Code)
 	}
-	if identity.signUpCalls != 0 {
-		t.Fatalf("rate-limited signup reached identity service %d times", identity.signUpCalls)
+	if identity.startCalls != 0 {
+		t.Fatalf("rate-limited google start reached identity service %d times", identity.startCalls)
 	}
-	if recorder.Header().Get("Retry-After") != "3600" {
-		t.Fatalf("Retry-After = %q, want 3600", recorder.Header().Get("Retry-After"))
+	if recorder.Header().Get("Retry-After") != "60" {
+		t.Fatalf("Retry-After = %q, want 60", recorder.Header().Get("Retry-After"))
 	}
 }
 
-func TestSignupRateLimitCallsIdentityForAllowedRequest(t *testing.T) {
+func TestGoogleStartRateLimitStopsAfterConfiguredRequests(t *testing.T) {
 	identity := &identityStub{}
 	router := (&Server{Identity: identity}).Router()
-	request := httptest.NewRequest(http.MethodPost, "/v1/signup", strings.NewReader(`{"email":"user@example.test","password":"long-enough-password"}`))
-	request.RemoteAddr = "192.0.2.13:1234"
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusAccepted || identity.signUpCalls != 1 {
-		t.Fatalf("allowed signup response = %d with %d identity calls, want 202 and one call", recorder.Code, identity.signUpCalls)
-	}
-}
-
-func TestLoginAccountRateLimitHoldsAcrossClientIPs(t *testing.T) {
-	identity := &identityStub{loginError: errors.New("invalid email or password")}
-	router := (&Server{Identity: identity}).Router()
-	for i := 0; i < 11; i++ {
-		request := httptest.NewRequest(http.MethodPost, "/v1/login", strings.NewReader(`{"email":"Victim@Example.test","password":"guess-password-1"}`))
-		request.RemoteAddr = fmt.Sprintf("198.51.100.%d:1234", i+1)
+	for i := 0; i < 60; i++ {
+		request := httptest.NewRequest(http.MethodGet, "/v1/auth/google/start", nil)
+		request.RemoteAddr = "192.0.2.20:1234"
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, request)
-		if i < 10 && recorder.Code != http.StatusUnauthorized {
-			t.Fatalf("attempt %d status = %d, want 401 from identity", i+1, recorder.Code)
-		}
-		if i == 10 && recorder.Code != http.StatusTooManyRequests {
-			t.Fatalf("attempt 11 status = %d, want 429", recorder.Code)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("allowed google start %d status = %d, want 200", i+1, recorder.Code)
 		}
 	}
-	if identity.loginCalls != 10 {
-		t.Fatalf("identity login calls = %d, want 10", identity.loginCalls)
+	request := httptest.NewRequest(http.MethodGet, "/v1/auth/google/start", nil)
+	request.RemoteAddr = "192.0.2.20:1234"
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("google start after the allowed quota status = %d, want 429", recorder.Code)
+	}
+	if identity.startCalls != 60 {
+		t.Fatalf("identity start calls = %d, want 60 calls before the rate limit", identity.startCalls)
 	}
 }
 
@@ -318,93 +336,30 @@ func TestForwardedForIsIgnoredWithoutTrustedProxy(t *testing.T) {
 	identity := &identityStub{}
 	router := (&Server{Identity: identity}).Router()
 	statuses := []int{}
-	for i := 0; i < 6; i++ {
-		request := httptest.NewRequest(http.MethodPost, "/v1/signup", strings.NewReader(`{"email":"user@example.test","password":"long-enough-password"}`))
+	for i := 0; i < 61; i++ {
+		request := httptest.NewRequest(http.MethodGet, "/v1/auth/google/start", nil)
 		request.RemoteAddr = "203.0.113.9:1234"
 		request.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i+1))
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, request)
 		statuses = append(statuses, recorder.Code)
 	}
-	if statuses[5] != http.StatusTooManyRequests {
-		t.Fatalf("statuses with rotating X-Forwarded-For = %v, want the sixth signup limited", statuses)
+	if statuses[60] != http.StatusTooManyRequests {
+		t.Fatalf("statuses with rotating X-Forwarded-For = %v, want the 61st sign-in limited", statuses)
 	}
 }
 
 func TestForwardedForIsHonoredFromTrustedProxy(t *testing.T) {
 	identity := &identityStub{}
 	router := (&Server{Identity: identity, TrustedProxies: []string{"203.0.113.0/24"}}).Router()
-	for i := 0; i < 6; i++ {
-		request := httptest.NewRequest(http.MethodPost, "/v1/signup", strings.NewReader(`{"email":"user@example.test","password":"long-enough-password"}`))
+	for i := 0; i < 60; i++ {
+		request := httptest.NewRequest(http.MethodGet, "/v1/auth/google/start", nil)
 		request.RemoteAddr = "203.0.113.9:1234"
 		request.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i+1))
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusAccepted {
-			t.Fatalf("signup %d from distinct forwarded client status = %d, want 202", i+1, recorder.Code)
-		}
-	}
-}
-
-func TestLoginRateLimitStopsAfterConfiguredRequests(t *testing.T) {
-	identity := &identityStub{}
-	router := (&Server{Identity: identity}).Router()
-	for i := 0; i < 10; i++ {
-		request := httptest.NewRequest(http.MethodPost, "/v1/login", strings.NewReader(`{"email":"user@example.test","password":"long-enough-password"}`))
-		request.RemoteAddr = "192.0.2.20:1234"
-		recorder := httptest.NewRecorder()
-		router.ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusOK {
-			t.Fatalf("allowed login %d status = %d, want 200", i+1, recorder.Code)
+			t.Fatalf("google start %d from distinct forwarded client status = %d, want 200", i+1, recorder.Code)
 		}
-	}
-	request := httptest.NewRequest(http.MethodPost, "/v1/login", strings.NewReader(`{"email":"user@example.test","password":"long-enough-password"}`))
-	request.RemoteAddr = "192.0.2.20:1234"
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("login after the allowed quota status = %d, want 429", recorder.Code)
-	}
-	if identity.loginCalls != 10 {
-		t.Fatalf("identity login calls = %d, want 10 calls before the rate limit", identity.loginCalls)
-	}
-}
-
-func TestLoginRateLimitCallsIdentityForAllowedRequest(t *testing.T) {
-	identity := &identityStub{}
-	router := (&Server{Identity: identity}).Router()
-	request := httptest.NewRequest(http.MethodPost, "/v1/login", strings.NewReader(`{"email":"user@example.test","password":"long-enough-password"}`))
-	request.RemoteAddr = "192.0.2.21:1234"
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK || identity.loginCalls != 1 {
-		t.Fatalf("allowed login response = %d with %d identity calls, want 200 and one call", recorder.Code, identity.loginCalls)
-	}
-}
-
-func TestLoginRejectsMalformedRequestBody(t *testing.T) {
-	identity := &identityStub{}
-	router := (&Server{Identity: identity}).Router()
-	request := httptest.NewRequest(http.MethodPost, "/v1/login", strings.NewReader(`{`))
-	request.RemoteAddr = "192.0.2.22:1234"
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("malformed login status = %d, want 400", recorder.Code)
-	}
-	if identity.loginCalls != 0 {
-		t.Fatalf("malformed login reached identity service %d times", identity.loginCalls)
-	}
-}
-
-func TestLoginRejectsInvalidCredentials(t *testing.T) {
-	identity := &identityStub{loginError: errors.New("invalid credentials")}
-	router := (&Server{Identity: identity}).Router()
-	request := httptest.NewRequest(http.MethodPost, "/v1/login", strings.NewReader(`{"email":"user@example.test","password":"incorrect-password"}`))
-	request.RemoteAddr = "192.0.2.23:1234"
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("invalid login status = %d, want 401", recorder.Code)
 	}
 }

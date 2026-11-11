@@ -46,9 +46,10 @@ openssl rand -hex 16   # DSTACK_ENCRYPTION_KEY, exactly 32 bytes
 ```
 
 Put those values in `.env`. Then replace the remaining placeholders with the real
-Midtrans keys, the SMTP credentials, the public address of the backend, and the
-provider account email. `PUBLIC_BASE_URL` must be an absolute `https` URL because it
-becomes the link in every mail the backend sends.
+Midtrans keys, the Google OAuth client credentials, the public address of the backend,
+and the provider account email. `PUBLIC_BASE_URL` must be an absolute `https` URL because
+it becomes the return link after checkout. `GOOGLE_REDIRECT_URL` must match the redirect
+URI registered for the Google OAuth client exactly.
 
 The backend listens on plain HTTP. Put a TLS reverse proxy in front of the published
 backend port before any public traffic reaches it.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -39,9 +40,8 @@ type Server struct {
 }
 
 type identityService interface {
-	SignUp(context.Context, string, string) error
-	VerifyEmail(context.Context, string) (string, error)
-	Login(context.Context, string, string) (identity.Session, error)
+	StartGoogle() (string, string, error)
+	CompleteGoogle(context.Context, string, string) (identity.Session, error)
 	Authenticate(context.Context, string) (string, error)
 	IsProvider(context.Context, string) (bool, error)
 	Email(context.Context, string) (string, error)
@@ -103,9 +103,8 @@ func (s *Server) Router() *gin.Engine {
 	}
 	r.Use(gin.Recovery())
 	v1 := r.Group("/v1")
-	v1.POST("/signup", s.rateLimit("signup", 5, time.Hour), s.signup)
-	v1.POST("/email-verifications/confirm", s.rateLimit("verify", 10, time.Hour), s.verify)
-	v1.POST("/login", s.rateLimit("login", 10, time.Minute), s.login)
+	v1.GET("/auth/google/start", s.rateLimit("google-start", 60, time.Minute), s.googleStart)
+	v1.POST("/auth/google/callback", s.rateLimit("google-callback", 30, time.Minute), s.googleCallback)
 	v1.POST("/logout", s.logout)
 	v1.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 	portal := v1.Group("")
@@ -161,57 +160,31 @@ func decode(c *gin.Context, out any) error {
 	return dec.Decode(out)
 }
 
-func (s *Server) signup(c *gin.Context) {
-	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
-	if err := decode(c, &req); err != nil {
-		respondError(c, 400, errors.New("invalid request body"))
-		return
-	}
-	if err := s.Identity.SignUp(c, req.Email, req.Password); err != nil {
-		respondError(c, 400, err)
-		return
-	}
-	c.Status(http.StatusAccepted)
-}
-func (s *Server) verify(c *gin.Context) {
-	var req struct {
-		Token string `json:"token"`
-	}
-	if err := decode(c, &req); err != nil {
-		respondError(c, 400, errors.New("invalid request body"))
-		return
-	}
-	id, err := s.Identity.VerifyEmail(c, req.Token)
+func (s *Server) googleStart(c *gin.Context) {
+	authorizationURL, state, err := s.Identity.StartGoogle()
 	if err != nil {
-		respondError(c, 400, err)
+		respondError(c, http.StatusServiceUnavailable, errors.New("google sign-in is unavailable"))
 		return
 	}
-	c.JSON(200, gin.H{"user_id": id, "tenant_state": "provisioning"})
+	c.JSON(http.StatusOK, gin.H{"authorization_url": authorizationURL, "state": state})
 }
-func (s *Server) login(c *gin.Context) {
+
+func (s *Server) googleCallback(c *gin.Context) {
 	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Code  string `json:"code"`
+		State string `json:"state"`
 	}
 	if err := decode(c, &req); err != nil {
 		respondError(c, 400, errors.New("invalid request body"))
 		return
 	}
-	account := "login-account:" + strings.ToLower(strings.TrimSpace(req.Email))
-	if !s.Limiter.Allow(account, 10, 15*time.Minute, time.Now()) {
-		c.Header("Retry-After", strconv.Itoa(int((15 * time.Minute).Seconds())))
-		respondError(c, http.StatusTooManyRequests, errors.New("too many requests"))
-		return
-	}
-	session, err := s.Identity.Login(c, req.Email, req.Password)
+	session, err := s.Identity.CompleteGoogle(c, req.Code, req.State)
 	if err != nil {
-		respondError(c, 401, err)
+		log.Printf("google sign-in failed: %v", err)
+		respondError(c, http.StatusUnauthorized, errors.New("google sign-in failed"))
 		return
 	}
-	c.JSON(200, gin.H{"token": session.Token, "expires_at": session.ExpiresAt})
+	c.JSON(http.StatusOK, gin.H{"token": session.Token, "expires_at": session.ExpiresAt})
 }
 
 func (s *Server) logout(c *gin.Context) {

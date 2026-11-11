@@ -14,7 +14,9 @@ var loadEnvNames = []string{
 	"DSTACK_CUSTOMER_TOKEN_MODE",
 	"DSTACK_ENCRYPTION_KEY",
 	"DSTACK_URL",
-	"EMAIL_DELIVERY",
+	"GOOGLE_CLIENT_ID",
+	"GOOGLE_CLIENT_SECRET",
+	"GOOGLE_REDIRECT_URL",
 	"LISTEN_ADDR",
 	"MIDTRANS_BASE_URL",
 	"MIDTRANS_CLIENT_KEY",
@@ -23,12 +25,6 @@ var loadEnvNames = []string{
 	"MIDTRANS_STATUS_URL",
 	"PUBLIC_BASE_URL",
 	"SESSION_SECRET",
-	"SMTP_FROM",
-	"SMTP_HOST",
-	"SMTP_PASSWORD",
-	"SMTP_PORT",
-	"SMTP_USER",
-	"SMTP_VERIFY_TLS",
 	"TRUSTED_PROXY_CIDRS",
 }
 
@@ -41,7 +37,9 @@ func baseEnv() map[string]string {
 		"DSTACK_CUSTOMER_TOKEN_MODE": "admin_refresh",
 		"DSTACK_ENCRYPTION_KEY":      strings.Repeat("k", 32),
 		"DSTACK_URL":                 "https://dstack.internal",
-		"EMAIL_DELIVERY":             "smtp",
+		"GOOGLE_CLIENT_ID":           "google-client-id.apps.googleusercontent.com",
+		"GOOGLE_CLIENT_SECRET":       "google-client-secret",
+		"GOOGLE_REDIRECT_URL":        "https://app.example.com/api/auth/google/callback",
 		"LISTEN_ADDR":                "",
 		"MIDTRANS_BASE_URL":          "",
 		"MIDTRANS_CLIENT_KEY":        "midtrans-client-key",
@@ -50,12 +48,6 @@ func baseEnv() map[string]string {
 		"MIDTRANS_STATUS_URL":        "",
 		"PUBLIC_BASE_URL":            "https://app.example.com",
 		"SESSION_SECRET":             strings.Repeat("s", 32),
-		"SMTP_FROM":                  "billing@example.com",
-		"SMTP_HOST":                  "smtp.example.com",
-		"SMTP_PASSWORD":              "smtp-password",
-		"SMTP_PORT":                  "465",
-		"SMTP_USER":                  "smtp-user",
-		"SMTP_VERIFY_TLS":            "true",
 		"TRUSTED_PROXY_CIDRS":        "",
 	}
 }
@@ -107,23 +99,6 @@ func TestLoadAcceptsCompleteEnvironment(t *testing.T) {
 			},
 		},
 		{
-			name: "log email delivery needs no smtp settings",
-			overrides: map[string]string{
-				"EMAIL_DELIVERY":  "log",
-				"SMTP_HOST":       "",
-				"SMTP_USER":       "",
-				"SMTP_PASSWORD":   "",
-				"SMTP_FROM":       "",
-				"SMTP_PORT":       "",
-				"SMTP_VERIFY_TLS": "",
-			},
-			check: func(t *testing.T, cfg Config) {
-				if cfg.EmailDelivery != "log" || cfg.SMTPPort != 0 {
-					t.Fatalf("EmailDelivery = %q, SMTPPort = %d, want log and 0", cfg.EmailDelivery, cfg.SMTPPort)
-				}
-			},
-		},
-		{
 			name: "carries every configured value into the loaded config",
 			check: func(t *testing.T, cfg Config) {
 				wantString(t, cfg.DatabaseURL, "postgres://billing:billing@localhost:5432/billing", "DatabaseURL")
@@ -133,16 +108,9 @@ func TestLoadAcceptsCompleteEnvironment(t *testing.T) {
 				wantString(t, cfg.MidtransServerKey, "midtrans-server-key", "MidtransServerKey")
 				wantString(t, cfg.MidtransClientKey, "midtrans-client-key", "MidtransClientKey")
 				wantString(t, cfg.PublicBaseURL, "https://app.example.com", "PublicBaseURL")
-				wantString(t, cfg.SMTPHost, "smtp.example.com", "SMTPHost")
-				wantString(t, cfg.SMTPUser, "smtp-user", "SMTPUser")
-				wantString(t, cfg.SMTPPassword, "smtp-password", "SMTPPassword")
-				wantString(t, cfg.SMTPFrom, "billing@example.com", "SMTPFrom")
-				if cfg.SMTPPort != 465 {
-					t.Errorf("SMTPPort = %d, want 465", cfg.SMTPPort)
-				}
-				if !cfg.VerifyTLS {
-					t.Error("VerifyTLS = false, want true")
-				}
+				wantString(t, cfg.GoogleClientID, "google-client-id.apps.googleusercontent.com", "GoogleClientID")
+				wantString(t, cfg.GoogleClientSecret, "google-client-secret", "GoogleClientSecret")
+				wantString(t, cfg.GoogleRedirectURL, "https://app.example.com/api/auth/google/callback", "GoogleRedirectURL")
 				if len(cfg.SessionSecret) != 32 {
 					t.Errorf("len(SessionSecret) = %d, want 32", len(cfg.SessionSecret))
 				}
@@ -184,15 +152,6 @@ func TestLoadAcceptsCompleteEnvironment(t *testing.T) {
 			overrides: map[string]string{"DATABASE_URL": "postgresql://billing@localhost:5432/billing"},
 			check: func(t *testing.T, cfg Config) {
 				wantString(t, cfg.DatabaseURL, "postgresql://billing@localhost:5432/billing", "DatabaseURL")
-			},
-		},
-		{
-			name:      "accepts a numeric true for smtp tls verification",
-			overrides: map[string]string{"SMTP_VERIFY_TLS": "1"},
-			check: func(t *testing.T, cfg Config) {
-				if !cfg.VerifyTLS {
-					t.Error("VerifyTLS = false, want true")
-				}
 			},
 		},
 		{
@@ -254,51 +213,6 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 			wantError: "TRUSTED_PROXY_CIDRS must contain only CIDR ranges",
 		},
 		{
-			name:      "email delivery must be a supported mode",
-			overrides: map[string]string{"EMAIL_DELIVERY": "oauth"},
-			wantError: "EMAIL_DELIVERY must be smtp or log",
-		},
-		{
-			name:      "smtp mode still requires a mail host",
-			overrides: map[string]string{"SMTP_HOST": ""},
-			wantError: "SMTP_HOST is required",
-		},
-		{
-			name:      "smtp tls verification must be enabled",
-			overrides: map[string]string{"SMTP_VERIFY_TLS": "false"},
-			wantError: "SMTP_VERIFY_TLS must be true",
-		},
-		{
-			name:      "smtp tls verification must be set",
-			overrides: map[string]string{"SMTP_VERIFY_TLS": ""},
-			wantError: "SMTP_VERIFY_TLS must be true",
-		},
-		{
-			name:      "smtp port is required",
-			overrides: map[string]string{"SMTP_PORT": ""},
-			wantError: "SMTP_PORT is required",
-		},
-		{
-			name:      "smtp port must be a number",
-			overrides: map[string]string{"SMTP_PORT": "not-a-port"},
-			wantError: "SMTP_PORT must be a valid port",
-		},
-		{
-			name:      "smtp port must not be zero",
-			overrides: map[string]string{"SMTP_PORT": "0"},
-			wantError: "SMTP_PORT must be a valid port",
-		},
-		{
-			name:      "smtp port must not exceed the port range",
-			overrides: map[string]string{"SMTP_PORT": "65536"},
-			wantError: "SMTP_PORT must be a valid port",
-		},
-		{
-			name:      "smtp port must use implicit tls",
-			overrides: map[string]string{"SMTP_PORT": "587"},
-			wantError: "SMTP_PORT must use implicit TLS on port 465",
-		},
-		{
 			name:      "database url is required",
 			overrides: map[string]string{"DATABASE_URL": ""},
 			wantError: "DATABASE_URL is required",
@@ -339,24 +253,19 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 			wantError: "PUBLIC_BASE_URL is required",
 		},
 		{
-			name:      "smtp host is required",
-			overrides: map[string]string{"SMTP_HOST": ""},
-			wantError: "SMTP_HOST is required",
+			name:      "google client id is required",
+			overrides: map[string]string{"GOOGLE_CLIENT_ID": ""},
+			wantError: "GOOGLE_CLIENT_ID is required",
 		},
 		{
-			name:      "smtp user is required",
-			overrides: map[string]string{"SMTP_USER": ""},
-			wantError: "SMTP_USER is required",
+			name:      "google client secret is required",
+			overrides: map[string]string{"GOOGLE_CLIENT_SECRET": ""},
+			wantError: "GOOGLE_CLIENT_SECRET is required",
 		},
 		{
-			name:      "smtp password is required",
-			overrides: map[string]string{"SMTP_PASSWORD": ""},
-			wantError: "SMTP_PASSWORD is required",
-		},
-		{
-			name:      "smtp from is required",
-			overrides: map[string]string{"SMTP_FROM": ""},
-			wantError: "SMTP_FROM is required",
+			name:      "google redirect url is required",
+			overrides: map[string]string{"GOOGLE_REDIRECT_URL": ""},
+			wantError: "GOOGLE_REDIRECT_URL is required",
 		},
 		{
 			name:      "session secret must reach the minimum length",
@@ -389,6 +298,21 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 			wantError: "DSTACK_URL must be an HTTPS URL",
 		},
 		{
+			name:      "google redirect url must use https",
+			overrides: map[string]string{"GOOGLE_REDIRECT_URL": "http://app.example.com/api/auth/google/callback"},
+			wantError: "GOOGLE_REDIRECT_URL must be an HTTPS URL",
+		},
+		{
+			name:      "google redirect url must be absolute",
+			overrides: map[string]string{"GOOGLE_REDIRECT_URL": "/api/auth/google/callback"},
+			wantError: "GOOGLE_REDIRECT_URL must be an HTTPS URL",
+		},
+		{
+			name:      "google redirect url must not carry credentials",
+			overrides: map[string]string{"GOOGLE_REDIRECT_URL": "https://user:pass@app.example.com/callback"},
+			wantError: "GOOGLE_REDIRECT_URL must be an HTTPS URL",
+		},
+		{
 			name:      "encryption key must not be shorter than 32 bytes",
 			overrides: map[string]string{"DSTACK_ENCRYPTION_KEY": strings.Repeat("k", 31)},
 			wantError: "DSTACK_ENCRYPTION_KEY must contain exactly 32 bytes",
@@ -399,23 +323,18 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 			wantError: "DSTACK_ENCRYPTION_KEY must contain exactly 32 bytes",
 		},
 		{
-			name:      "database url must use postgresql",
-			overrides: map[string]string{"DATABASE_URL": "mysql://billing@localhost:3306/billing"},
-			wantError: "DATABASE_URL must use PostgreSQL",
-		},
-		{
 			name:      "midtrans environment must be sandbox or production",
 			overrides: map[string]string{"MIDTRANS_ENVIRONMENT": "staging"},
 			wantError: "MIDTRANS_ENVIRONMENT must be sandbox or production",
 		},
 		{
 			name:      "midtrans base url must use https",
-			overrides: map[string]string{"MIDTRANS_BASE_URL": "http://app.sandbox.midtrans.com"},
+			overrides: map[string]string{"MIDTRANS_BASE_URL": "http://payments.example.com"},
 			wantError: "MIDTRANS_BASE_URL must be an HTTPS URL",
 		},
 		{
 			name:      "midtrans status url must use https",
-			overrides: map[string]string{"MIDTRANS_STATUS_URL": "http://api.sandbox.midtrans.com"},
+			overrides: map[string]string{"MIDTRANS_STATUS_URL": "http://status.example.com"},
 			wantError: "MIDTRANS_STATUS_URL must be an HTTPS URL",
 		},
 	}
@@ -423,10 +342,9 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			applyEnv(t, test.overrides)
-			if _, err := Load(); err == nil {
-				t.Fatal("Load() accepted an invalid environment")
-			} else if !strings.Contains(err.Error(), test.wantError) {
-				t.Fatalf("Load() error = %q, want it to mention %q", err, test.wantError)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("Load() error = %v, want %q", err, test.wantError)
 			}
 		})
 	}

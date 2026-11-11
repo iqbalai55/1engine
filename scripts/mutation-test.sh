@@ -27,7 +27,7 @@ set +e
 	--disable='arithmetic/*' \
 	--disable='numbers/*' \
 	--exec="$(dirname "$0")/run-mutated-go-tests.sh" \
-	--match='^(Allow|rateLimit|signup|login|secret|create|Issue|Rotate|Revoke|List|Authenticate)$' \
+	--match='^(Allow|rateLimit|googleStart|googleCallback|create|Issue|Rotate|Revoke|List|Authenticate)$' \
 	./internal/httpapi \
 	./internal/apikey
 status=$?

@@ -8,7 +8,7 @@ The current release includes dstack integration. Beta9 is a planned provider int
 
 ## Run the service
 
-1. Copy `.env.example` into the deployment secret store and replace every sample value. `EMAIL_DELIVERY=smtp` uses SMTP implicit TLS on port 465. `EMAIL_DELIVERY=log` writes verification links to the service log instead, for development only, and then no SMTP settings are needed.
+1. Copy `.env.example` into the deployment secret store and replace every sample value. Register a Google OAuth web client and set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URL` to its credentials and redirect URI. Portal sign-in uses only that Google client.
 2. Configure PostgreSQL with TLS and a database role that can create the extension and schema objects in the migration.
 3. Confirm that the installed dstack release supports `POST /api/users/refresh_token` and returns `creds.token` to an admin. Token refresh uses the dstack admin credential only on the dstack admin API. Customer requests use the returned tenant token.
 4. Set `DSTACK_CUSTOMER_TOKEN_MODE=admin_refresh`. Provisioning fails closed if the installed dstack does not support this operation.
@@ -26,7 +26,7 @@ The service applies pending migrations at startup. The backend is organized as a
 
 ## Bootstrap the provider account
 
-Create and verify a portal account first. Then run the one-time command with the service configuration loaded, including `DATABASE_URL`.
+Create a portal account through Google sign-in first. Then run the one-time command with the service configuration loaded, including `DATABASE_URL`.
 
 ```sh
 go run ./cmd/provider-bootstrap provider-admin --email provider@example.com
@@ -47,7 +47,7 @@ PostgreSQL integration tests run when `TEST_DATABASE_URL` points at an isolated 
 TEST_DATABASE_URL='postgres://billing_test:secret@localhost:5432/billing_test?sslmode=verify-full' go test -p 1 ./internal/apikey ./internal/compute ./internal/store
 ```
 
-Install `go-mutesting` and `jq`, then run mutation tests for signup, login, rate limiting, and API-key behavior. Arithmetic mutations are disabled because this mutator emits invalid Go for those expressions in the module. The command fails when a mutant survives or cannot be executed. It writes `report.json` and `go-mutesting-report.html` in the repository root.
+Install `go-mutesting` and `jq`, then run mutation tests for Google sign-in, rate limiting, and API-key behavior. Arithmetic mutations are disabled because this mutator emits invalid Go for those expressions in the module. The command fails when a mutant survives or cannot be executed. It writes `report.json` and `go-mutesting-report.html` in the repository root.
 
 ```sh
 go install github.com/avito-tech/go-mutesting/cmd/go-mutesting@latest
@@ -60,7 +60,7 @@ The dstack observation worker records instance runtime intervals and charges eac
 
 ## Main routes
 
-- `POST /v1/signup`, `POST /v1/email-verifications/confirm`, and `POST /v1/login` manage portal identity.
+- `GET /v1/auth/google/start` and `POST /v1/auth/google/callback` sign a portal account in with Google.
 - `GET /v1/me`, `/v1/me/credits`, `/v1/me/usage`, and `/v1/me/purchases` read the signed-in tenant's data.
 - `POST /v1/offers` lists rentable GPUs with their hourly price. It asks dstack for offers only, so it reserves nothing and needs no fleet.
 - `POST /v1/api-keys`, `POST /v1/api-keys/{id}/rotate`, and `DELETE /v1/api-keys/{id}` manage customer keys.
