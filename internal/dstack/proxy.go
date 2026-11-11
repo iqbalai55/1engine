@@ -72,6 +72,8 @@ func defaultPolicies() []RoutePolicy {
 	}
 	return []RoutePolicy{
 		pattern("POST", `^/api/runs/list$`, OperationRead),
+		pattern("POST", `^/api/runs/(get|get_plan)$`, OperationRead),
+		pattern("POST", `^/api/logs/poll$`, OperationRead),
 		pattern("POST", `^/api/instances/list$`, OperationRead),
 		pattern("POST", `^/api/events/list$`, OperationRead),
 		pattern("POST", `^/api/projects/[^/]+/get$`, OperationRead),
@@ -278,7 +280,9 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 		return SafeResponse{}, domain.ErrTenantUnavailable
 	}
 	path := op.Path
-	if projectPath(path) {
+	if scoped, ok := projectScopedPath(path, string(binding.Project)); ok {
+		path = scoped
+	} else if projectPath(path) {
 		parts := strings.Split(path, "/")
 		if len(parts) < 4 || parts[3] == "" {
 			return SafeResponse{}, errors.New("invalid project path")
@@ -434,6 +438,22 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 
 func projectPath(path string) bool {
 	return strings.HasPrefix(path, "/api/project/") || strings.HasPrefix(path, "/api/projects/") || strings.HasPrefix(path, "/proxy/")
+}
+
+// projectAliases are customer routes that need a project on the server side but should
+// not make the customer name one.
+var projectAliases = map[string]string{
+	"/api/runs/get":      "/runs/get",
+	"/api/runs/get_plan": "/runs/get_plan",
+	"/api/logs/poll":     "/logs/poll",
+}
+
+func projectScopedPath(path, project string) (string, bool) {
+	suffix, ok := projectAliases[path]
+	if !ok {
+		return path, false
+	}
+	return "/api/project/" + url.PathEscape(project) + suffix, true
 }
 
 func bindProject(raw []byte, path, project, projectID, username string) ([]byte, error) {

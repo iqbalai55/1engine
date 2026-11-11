@@ -20,6 +20,9 @@ func TestPolicyAllowsDocumentedOperationsAndRejectsOthers(t *testing.T) {
 		kind   OperationKind
 	}{
 		{http.MethodPost, "/api/runs/list", OperationRead},
+		{http.MethodPost, "/api/runs/get", OperationRead},
+		{http.MethodPost, "/api/runs/get_plan", OperationRead},
+		{http.MethodPost, "/api/logs/poll", OperationRead},
 		{http.MethodPost, "/api/instances/list", OperationRead},
 		{http.MethodPost, "/api/project/acme/runs/get", OperationRead},
 		{http.MethodPost, "/api/project/acme/runs/apply", OperationStart},
@@ -139,6 +142,44 @@ func TestProxyExecutesRunPlanForTheTenantProject(t *testing.T) {
 	}
 	if strings.Contains(forwarded, "project_name") || strings.Contains(forwarded, "tenant_id") {
 		t.Fatalf("plan request leaked a project field the proxy should own: %s", forwarded)
+	}
+}
+
+func TestProxyScopesAliasedReadsToTheTenantProject(t *testing.T) {
+	var paths []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	backends, err := ParseProviderBackends([]byte("backends:\n  - type: aws\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := NewProxy(server.URL, proxyCredential("tenant-token"), nil, nil)
+	proxy.Backends = backends
+	proxy.HTTP = server.Client()
+	binding := domain.DStackBinding{Project: "tenant-project", Username: "tenant-user", Provision: domain.ProvisionReady}
+	for _, test := range []struct {
+		path string
+		body string
+		want string
+	}{
+		{"/api/runs/get_plan", `{"run_spec":{"configuration":{"type":"task"}}}`, "/api/project/tenant-project/runs/get_plan"},
+		{"/api/runs/get", `{"run_name":"hello"}`, "/api/project/tenant-project/runs/get"},
+		{"/api/logs/poll", `{"run_name":"hello"}`, "/api/project/tenant-project/logs/poll"},
+	} {
+		op := Operation{Method: http.MethodPost, Path: test.path, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(test.body)}
+		if _, err := proxy.Execute(context.Background(), "tenant-id", binding, op); err != nil {
+			t.Fatalf("%s: %v", test.path, err)
+		}
+		if got := paths[len(paths)-1]; got != test.want {
+			t.Errorf("%s forwarded to %s, want %s", test.path, got, test.want)
+		}
+	}
+	if len(paths) != 3 {
+		t.Fatalf("forwarded %d requests, want 3", len(paths))
 	}
 }
 
