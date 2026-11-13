@@ -285,6 +285,10 @@ price dstack reports with the provider's console price for the same instance typ
 | Customer requests return 402 | Insufficient credits, or the price is not verified | Expected until billing is verified. |
 | `DSTACK_ENCRYPTION_KEY must contain exactly 32 bytes` | Key length is wrong | Regenerate with `openssl rand -hex 16`. |
 | dstack admin token rejected after editing `.env` | dstack stores its token on first start | Keep `DSTACK_ADMIN_TOKEN` unchanged, or reset the dstack volume. Read `deploy/README.md` before resetting. |
+| `GET /v1/runs/{name}/ssh` returns 409 | The run is not running yet, or dstack has no SSH proxy configured | Wait for the run, and check `DSTACK_SERVER_SSHPROXY_ADDRESS` and `DSTACK_SSHPROXY_API_TOKEN`. |
+| SSH connection refused | The proxy port is not reachable from the customer | Check the TCP load balancer, `SSHPROXY_PUBLIC_ADDRESS`, and the loopback port mapping. |
+| SSH returns `Permission denied (publickey)` | The key is not registered on the tenant account, or the run belongs to another tenant | List `/v1/ssh-keys`, re-register the public key, and check the run name. |
+| SSH host key changed | The `sshproxy-keys` volume was recreated | Restore the volume from backup, or accept the new fingerprint and tell customers. |
 
 ## Backups
 

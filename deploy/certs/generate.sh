@@ -65,6 +65,7 @@ issue_leaf "dstack-edge" "DNS:dstack-edge,DNS:localhost,IP:127.0.0.1" "$DSTACK_C
 issue_leaf "postgres" "DNS:postgres" "$POSTGRES_CERT_DIR"
 
 chmod 0600 "$POSTGRES_CERT_DIR/tls.key"
+chown 999:999 "$POSTGRES_CERT_DIR/tls.key"
 
 cp "$CA_CRT" "$TRUST_DIR/ca.crt"
 cat "$PUBLIC_ROOTS" "$CA_CRT" > "$TRUST_DIR/ca-bundle.pem"

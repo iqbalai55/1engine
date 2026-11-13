@@ -219,7 +219,7 @@ owner=$(docker run --rm --entrypoint stat \
     -v "$postgres_cert_volume:/out/postgres:ro" \
     "$CERT_INIT_IMAGE" \
     -c '%u:%g' /out/postgres/tls.key)
-[ "$owner" = "0:0" ] || fail "the postgres key is owned by $owner instead of root"
+[ "$owner" = "999:999" ] || fail "the postgres key is owned by $owner instead of the postgres user"
 mode=$(docker run --rm --entrypoint stat \
     -v "$postgres_cert_volume:/out/postgres:ro" \
     "$CERT_INIT_IMAGE" \
