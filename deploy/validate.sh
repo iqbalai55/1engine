@@ -17,6 +17,8 @@ required_vars=(
     DSTACK_ADMIN_TOKEN
     SESSION_SECRET
     DSTACK_ENCRYPTION_KEY
+    SSHPROXY_API_TOKEN
+    SSHPROXY_PUBLIC_ADDRESS
     MIDTRANS_SERVER_KEY
     MIDTRANS_CLIENT_KEY
     PUBLIC_BASE_URL
@@ -48,13 +50,14 @@ trust_volume=""
 dstack_cert_volume=""
 postgres_cert_volume=""
 dstack_data_volume=""
+sshproxy_keys_volume=""
 
 cleanup() {
     if [ -n "$rendered" ]; then
         rm -f "$rendered"
     fi
     docker volume rm -f "$ca_volume" "$trust_volume" "$dstack_cert_volume" \
-        "$postgres_cert_volume" "$dstack_data_volume" >/dev/null 2>&1 || true
+        "$postgres_cert_volume" "$dstack_data_volume" "$sshproxy_keys_volume" >/dev/null 2>&1 || true
     docker image rm -f "$BACKEND_IMAGE" "$CERT_INIT_IMAGE" >/dev/null 2>&1 || true
     return 0
 }
@@ -116,13 +119,14 @@ def mounted_by(volume):
 
 check(mounted_by("ca-keys") == ["cert-init"], "the CA private key volume is mounted outside cert-init")
 check(
-    mounted_by("trust") == ["backend", "bootstrap", "cert-init", "dstack"],
+    mounted_by("trust") == ["backend", "bootstrap", "cert-init", "dstack", "sshproxy"],
     "the trust volume is mounted by an unexpected service",
 )
 check(mounted_by("dstack-certs") == ["caddy", "cert-init"], "the dstack certificate volume is mounted by an unexpected service")
 check(mounted_by("postgres-certs") == ["cert-init", "postgres"], "the postgres certificate volume is mounted by an unexpected service")
+check(mounted_by("sshproxy-keys") == ["cert-init", "sshproxy"], "the SSH proxy host keys are mounted by an unexpected service")
 
-for name in ("backend", "bootstrap", "dstack"):
+for name in ("backend", "bootstrap", "dstack", "sshproxy"):
     for source, mount in volumes[name].items():
         if source == "trust":
             check(mount.get("read_only") is True, f"{name} mounts the trust volume writable")
@@ -152,6 +156,23 @@ check(
     services["backend"]["environment"].get("DSTACK_URL") == "https://dstack-edge",
     "the backend does not reach dstack through the TLS endpoint",
 )
+check(
+    services["dstack"]["environment"].get("DSTACK_SERVER_SSHPROXY_ENFORCED") == "1",
+    "dstack does not enforce the SSH proxy",
+)
+check(
+    bool(services["dstack"]["environment"].get("DSTACK_SERVER_SSHPROXY_ADDRESS")),
+    "dstack does not advertise an SSH proxy address",
+)
+check(
+    services["dstack"]["environment"].get("DSTACK_SSHPROXY_API_TOKEN")
+    == services["sshproxy"]["environment"].get("DSTACK_SSHPROXY_API_TOKEN"),
+    "the SSH proxy does not share its token with dstack",
+)
+check(
+    services["sshproxy"]["environment"].get("SSL_CERT_FILE") == "/trust/ca-bundle.pem",
+    "the SSH proxy does not trust the private CA",
+)
 
 if problems:
     for problem in problems:
@@ -168,6 +189,7 @@ trust_volume="1inference-validate-trust-${suffix}"
 dstack_cert_volume="1inference-validate-dstack-certs-${suffix}"
 postgres_cert_volume="1inference-validate-postgres-certs-${suffix}"
 dstack_data_volume="1inference-validate-dstack-data-${suffix}"
+sshproxy_keys_volume="1inference-validate-sshproxy-keys-${suffix}"
 
 docker run --rm \
     -v "$ca_volume:/ca" \
@@ -175,17 +197,20 @@ docker run --rm \
     -v "$dstack_cert_volume:/out/dstack" \
     -v "$postgres_cert_volume:/out/postgres" \
     -v "$dstack_data_volume:/dstack-server" \
+    -v "$sshproxy_keys_volume:/sshproxy" \
     "$CERT_INIT_IMAGE" >/dev/null 2>&1 || fail "the certificate image failed"
 
 for path in /ca/ca.key /ca/ca.crt /trust/ca.crt /trust/ca-bundle.pem \
     /out/dstack/tls.crt /out/dstack/tls.key \
-    /out/postgres/tls.crt /out/postgres/tls.key /dstack-server/config.yml; do
+    /out/postgres/tls.crt /out/postgres/tls.key /dstack-server/config.yml \
+    /sshproxy/host_keys; do
     docker run --rm --entrypoint sh \
         -v "$ca_volume:/ca:ro" \
         -v "$trust_volume:/trust:ro" \
         -v "$dstack_cert_volume:/out/dstack:ro" \
         -v "$postgres_cert_volume:/out/postgres:ro" \
         -v "$dstack_data_volume:/dstack-server:ro" \
+        -v "$sshproxy_keys_volume:/sshproxy:ro" \
         "$CERT_INIT_IMAGE" \
         -c 'test -s "$1"' sh "$path" || fail "the certificate image did not create $path"
 done
@@ -200,6 +225,17 @@ mode=$(docker run --rm --entrypoint stat \
     "$CERT_INIT_IMAGE" \
     -c '%a' /out/postgres/tls.key)
 [ "$mode" = "600" ] || fail "the postgres key mode is $mode instead of 600"
+
+mode=$(docker run --rm --entrypoint stat \
+    -v "$sshproxy_keys_volume:/sshproxy:ro" \
+    "$CERT_INIT_IMAGE" \
+    -c '%a' /sshproxy/host_keys)
+[ "$mode" = "600" ] || fail "the SSH proxy host key mode is $mode instead of 600"
+key_count=$(docker run --rm --entrypoint sh \
+    -v "$sshproxy_keys_volume:/sshproxy:ro" \
+    "$CERT_INIT_IMAGE" \
+    -c 'grep -c "BEGIN OPENSSH PRIVATE KEY" /sshproxy/host_keys')
+[ "$key_count" -ge 3 ] || fail "the SSH proxy host key file has $key_count keys instead of at least 3"
 
 config=$(docker run --rm --entrypoint cat \
     -v "$dstack_data_volume:/dstack-server:ro" \

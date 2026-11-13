@@ -6,13 +6,15 @@ TRUST_DIR=${TRUST_DIR:-/trust}
 DSTACK_CERT_DIR=${DSTACK_CERT_DIR:-/out/dstack}
 POSTGRES_CERT_DIR=${POSTGRES_CERT_DIR:-/out/postgres}
 DSTACK_SERVER_DIR=${DSTACK_SERVER_DIR:-/dstack-server}
+SSHPROXY_KEY_DIR=${SSHPROXY_KEY_DIR:-/sshproxy}
 
 CA_KEY="$CA_DIR/ca.key"
 CA_CRT="$CA_DIR/ca.crt"
 DSTACK_CONFIG="$DSTACK_SERVER_DIR/config.yml"
+SSHPROXY_HOST_KEYS="$SSHPROXY_KEY_DIR/host_keys"
 PUBLIC_ROOTS=/etc/ssl/certs/ca-certificates.crt
 
-mkdir -p "$CA_DIR" "$TRUST_DIR" "$DSTACK_CERT_DIR" "$POSTGRES_CERT_DIR" "$DSTACK_SERVER_DIR"
+mkdir -p "$CA_DIR" "$TRUST_DIR" "$DSTACK_CERT_DIR" "$POSTGRES_CERT_DIR" "$DSTACK_SERVER_DIR" "$SSHPROXY_KEY_DIR"
 
 if [ ! -s "$CA_KEY" ] || [ ! -s "$CA_CRT" ]; then
     openssl req -x509 -newkey rsa:4096 -nodes -sha256 -days 3650 \
@@ -82,6 +84,16 @@ default_permissions:
   allow_non_admins_manage_ssh_fleets: false
 EOF
     chmod 0600 "$DSTACK_CONFIG"
+fi
+
+if [ ! -s "$SSHPROXY_HOST_KEYS" ]; then
+    key_dir=$(mktemp -d)
+    ssh-keygen -q -t ed25519 -N "" -C "1inference-sshproxy" -f "$key_dir/ssh_host_ed25519_key"
+    ssh-keygen -q -t ecdsa -b 256 -N "" -C "1inference-sshproxy" -f "$key_dir/ssh_host_ecdsa_key"
+    ssh-keygen -q -t rsa -b 3072 -N "" -C "1inference-sshproxy" -f "$key_dir/ssh_host_rsa_key"
+    cat "$key_dir"/ssh_host_*_key > "$SSHPROXY_HOST_KEYS"
+    rm -rf "$key_dir"
+    chmod 0600 "$SSHPROXY_HOST_KEYS"
 fi
 
 echo "certificate material is present"

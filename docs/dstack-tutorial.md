@@ -49,6 +49,7 @@ openssl rand -hex 24   # POSTGRES_SUPERUSER_PASSWORD
 openssl rand -hex 24   # BILLING_DB_PASSWORD
 openssl rand -hex 24   # DSTACK_DB_PASSWORD
 openssl rand -hex 24   # DSTACK_ADMIN_TOKEN
+openssl rand -hex 24   # SSHPROXY_API_TOKEN
 openssl rand -hex 32   # SESSION_SECRET
 openssl rand -hex 16   # DSTACK_ENCRYPTION_KEY (must be exactly 32 bytes)
 ```
@@ -59,6 +60,7 @@ Then set the remaining values:
 | --- | --- |
 | `MIDTRANS_SERVER_KEY`, `MIDTRANS_CLIENT_KEY` | Midtrans keys. Use sandbox keys while testing. |
 | `PUBLIC_BASE_URL` | Public HTTPS address of the backend, for example `https://billing.example.com`. |
+| `SSHPROXY_PUBLIC_ADDRESS` | Public `HOST:PORT` customers use for SSH, for example `ssh.example.com:2222`. |
 | `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | Mail server used for verification emails. Port 465 (implicit TLS) is required. |
 | `PROVIDER_ADMIN_EMAIL` | The email of the portal account that becomes provider administrator. |
 
@@ -242,6 +244,23 @@ for a provider you did not configure is rejected.
 
 Starting compute (`runs/apply`, `fleets/apply`) also needs an `Idempotency-Key` header, and it
 needs credits. Without a verified price, the backend returns HTTP 402.
+
+For a shell inside a run container, the customer registers a public key and asks for the
+proxied command:
+
+```sh
+curl -X POST https://billing.example.com/v1/ssh-keys \
+  -H "Authorization: Bearer $CUSTOMER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\":\"laptop\",\"key\":\"$(cat ~/.ssh/id_ed25519.pub)\"}"
+
+curl https://billing.example.com/v1/runs/my-dev-env/ssh \
+  -H "Authorization: Bearer $CUSTOMER_API_KEY"
+```
+
+The second call returns a command such as `ssh -p 2222 <job-id>@ssh.example.com`. That shell
+runs inside the customer's own container. It does not reach the GPU host. The run must be
+active and use a dev environment or another long-running configuration.
 
 ## 11. Billing is not active yet
 

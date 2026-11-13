@@ -17,6 +17,7 @@ services:
       - dstack-certs:/out/dstack
       - postgres-certs:/out/postgres
       - dstack-data:/dstack-server
+      - sshproxy-keys:/sshproxy
     networks:
       - edge
 
@@ -75,6 +76,9 @@ services:
       DSTACK_DO_NOT_UPDATE_DEFAULT_PROJECT: "1"
       DSTACK_DATABASE_URL: postgresql+asyncpg://dstack:${DSTACK_DB_PASSWORD:?set DSTACK_DB_PASSWORD in .env}@postgres:5432/dstack?ssl=verify-full
       PGSSLROOTCERT: /trust/ca.crt
+      DSTACK_SSHPROXY_API_TOKEN: ${SSHPROXY_API_TOKEN:?set SSHPROXY_API_TOKEN in .env}
+      DSTACK_SERVER_SSHPROXY_ADDRESS: ${SSHPROXY_PUBLIC_ADDRESS:?set SSHPROXY_PUBLIC_ADDRESS in .env}
+      DSTACK_SERVER_SSHPROXY_ENFORCED: "1"
     volumes:
       - dstack-data:/root/.dstack/server
       - trust:/trust:ro
@@ -86,6 +90,29 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
+    networks:
+      - edge
+
+  sshproxy:
+    image: ${SSHPROXY_IMAGE:-dstackai/sshproxy:0.0.3}
+    restart: unless-stopped
+    depends_on:
+      dstack:
+        condition: service_healthy
+      cert-init:
+        condition: service_completed_successfully
+    command:
+      - --host-key
+      - /sshproxy/host_keys
+    environment:
+      DSTACK_SSHPROXY_API_URL: https://dstack-edge
+      DSTACK_SSHPROXY_API_TOKEN: ${SSHPROXY_API_TOKEN:?set SSHPROXY_API_TOKEN in .env}
+      SSL_CERT_FILE: /trust/ca-bundle.pem
+    volumes:
+      - sshproxy-keys:/sshproxy:ro
+      - trust:/trust:ro
+    ports:
+      - "127.0.0.1:${SSHPROXY_PORT:-2222}:30022"
     networks:
       - edge
 
@@ -191,6 +218,7 @@ volumes:
   trust:
   dstack-certs:
   postgres-certs:
+  sshproxy-keys:
 
 networks:
   edge:

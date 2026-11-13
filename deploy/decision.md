@@ -18,9 +18,11 @@ The operator reads `README.md` for secret generation, bootstrap, backups, and po
 
 ## Shape
 
-The service graph has one PostgreSQL server with separate `billing` and `dstack` databases and roles, a pinned dstack server, a Caddy TLS endpoint, the Go backend, and a one-shot certificate initializer. Named volumes hold database state, dstack's server directory, the private CA, trust bundle, and service certificates.
+The service graph has one PostgreSQL server with separate `billing` and `dstack` databases and roles, a pinned dstack server, an SSH proxy for customer run access, a Caddy TLS endpoint, the Go backend, and a one-shot certificate initializer. Named volumes hold database state, dstack's server directory, the private CA, trust bundle, service certificates, and the SSH proxy host keys.
 
-The cert initializer creates an internal CA and leaf certificates. Caddy terminates TLS for dstack. The backend trusts that CA while retaining public roots for Midtrans and SMTP. The PostgreSQL server requires TLS and serves both application databases under distinct credentials. Published ports bind to host loopback only. The admin token must match between dstack and the backend and persists after first boot. There are no Go source changes.
+The cert initializer creates an internal CA, leaf certificates, and SSH proxy host keys. Caddy terminates TLS for dstack. The backend trusts that CA while retaining public roots for Midtrans and SMTP. The PostgreSQL server requires TLS and serves both application databases under distinct credentials. Published ports bind to host loopback only. The admin token must match between dstack and the backend and persists after first boot.
+
+dstack runs with the SSH proxy enforced. The proxy is the only path to a customer container, and the customer's key never reaches the host. The Compose stack keeps the proxy on loopback; a TCP load balancer exposes it to customers.
 
 The design follows **Foundational Thinking** by first tracing the deployment data shape, then defining the Compose service graph and persistent volumes before wiring startup logic. This changed the work from a backend HTTP-mode change to a deployment-level TLS endpoint.
 
@@ -43,6 +45,7 @@ The design follows **Experience First** by keeping the operator flow to an env f
 
 - The operator must keep the dstack and backend admin-token values aligned. Changing the env value does not rotate dstack's persisted token.
 - dstack has no compute backend in the supplied configuration. Operators must configure a cloud, Kubernetes, or SSH backend before workloads can run.
+- The SSH proxy is a public endpoint once the operator exposes it. It binds to loopback by default, requires a TCP load balancer, and becomes a single point of failure. Run a redundant pair if availability matters.
 - The backend itself listens on HTTP and binds to loopback. A separate TLS reverse proxy is required for public billing traffic.
 - The Compose stack uses named volumes. Removing them deletes persistent data and generated certificate material.
 - PostgreSQL TLS terminates at the shared private network server. It protects client connections, but the administrative CA and certificate secrets remain local files in volumes.
