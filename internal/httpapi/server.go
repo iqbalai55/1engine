@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -118,6 +119,11 @@ func (s *Server) Router() *gin.Engine {
 	portal.GET("/api-keys", s.listKeys)
 	portal.POST("/api-keys/:id/rotate", s.rateLimit("key-issue", 10, time.Hour), s.rotateKey)
 	portal.DELETE("/api-keys/:id", s.revokeKey)
+	customer := v1.Group("", s.authenticateCustomer(), s.rateLimitBy("customer", 300, time.Minute, tenantKey))
+	customer.GET("/ssh-keys", s.listSSHKeys)
+	customer.POST("/ssh-keys", s.rateLimitBy("ssh-key", 20, time.Hour, tenantKey), s.addSSHKey)
+	customer.DELETE("/ssh-keys/:id", s.deleteSSHKey)
+	customer.GET("/runs/:name/ssh", s.runSSH)
 	portal.POST("/credit-purchases", s.rateLimitBy("purchase", 10, time.Hour, tenantKey), s.createPurchase)
 	provider := v1.Group("/provider", s.authenticate(false), s.providerOnly())
 	provider.GET("/tenants", s.providerTenants)
@@ -239,6 +245,42 @@ func (s *Server) authenticate(apiOnly bool) gin.HandlerFunc {
 			}
 			p = principal{UserID: userID, TenantID: tenantID, Provider: provider, Kind: "portal"}
 		}
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), principalKey, p))
+		c.Next()
+	}
+}
+
+// authenticateCustomer accepts either a portal session or a customer API key.
+// SSH self-service is available from the portal and from automation alike.
+func (s *Server) authenticateCustomer() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		auth := c.GetHeader("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
+			respondError(c, http.StatusUnauthorized, errors.New("authentication required"))
+			c.Abort()
+			return
+		}
+		token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		if tenantID, err := s.Keys.Authenticate(c, token); err == nil {
+			p := principal{TenantID: domain.TenantID(tenantID), Kind: "api"}
+			c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), principalKey, p))
+			c.Next()
+			return
+		}
+		userID, err := s.Identity.Authenticate(c, token)
+		if err != nil {
+			respondError(c, http.StatusUnauthorized, errors.New("invalid credential"))
+			c.Abort()
+			return
+		}
+		tenantID, err := s.Tenants.FindByOwner(c, domain.UserID(userID))
+		if err != nil {
+			respondError(c, http.StatusForbidden, errors.New("verified tenant required"))
+			c.Abort()
+			return
+		}
+		provider, _ := s.Identity.IsProvider(c, userID)
+		p := principal{UserID: userID, TenantID: tenantID, Provider: provider, Kind: "portal"}
 		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), principalKey, p))
 		c.Next()
 	}
@@ -399,6 +441,189 @@ func (s *Server) listKeys(c *gin.Context) {
 	c.JSON(200, keys)
 }
 
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+func jsonHeaders() http.Header {
+	return http.Header{"Content-Type": []string{"application/json"}}
+}
+
+func validSSHPublicKey(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" || len(key) > 16_384 || strings.ContainsAny(key, "\r\n") {
+		return false
+	}
+	fields := strings.Fields(key)
+	if len(fields) < 2 {
+		return false
+	}
+	if fields[0] == "ssh-ed25519" || fields[0] == "ssh-rsa" || strings.HasPrefix(fields[0], "ecdsa-sha2-") || strings.HasPrefix(fields[0], "sk-") {
+		return true
+	}
+	return false
+}
+
+func (s *Server) customerBinding(c *gin.Context) (domain.TenantID, domain.DStackBinding, bool) {
+	p := mustPrincipal(c)
+	if p.TenantID == "" {
+		respondError(c, http.StatusForbidden, errors.New("provider account has no customer tenant"))
+		return "", domain.DStackBinding{}, false
+	}
+	binding, err := s.Tenants.Get(c, p.TenantID)
+	if err != nil {
+		respondError(c, http.StatusForbidden, domain.ErrTenantUnavailable)
+		return "", domain.DStackBinding{}, false
+	}
+	return p.TenantID, binding.DStack, true
+}
+
+func respondProxyError(c *gin.Context, err error) {
+	status := http.StatusForbidden
+	if errors.Is(err, domain.ErrInsufficientCredits) || errors.Is(err, domain.ErrPriceUnverified) {
+		status = http.StatusPaymentRequired
+	}
+	if errors.Is(err, domain.ErrTenantUnavailable) {
+		status = http.StatusServiceUnavailable
+	}
+	respondError(c, status, err)
+}
+
+func writeProxyResponse(c *gin.Context, response dstack.SafeResponse) {
+	for key, values := range response.Headers {
+		for _, value := range values {
+			c.Header(key, value)
+		}
+	}
+	c.Status(response.Status)
+	_, _ = c.Writer.Write(response.Body)
+}
+
+func (s *Server) listSSHKeys(c *gin.Context) {
+	tenantID, binding, ok := s.customerBinding(c)
+	if !ok {
+		return
+	}
+	response, err := s.DStack.Execute(c, tenantID, binding, dstack.Operation{
+		Method:  http.MethodPost,
+		Path:    "/api/users/public_keys/list",
+		Headers: jsonHeaders(),
+		Body:    []byte(`{}`),
+	})
+	if err != nil {
+		respondProxyError(c, err)
+		return
+	}
+	writeProxyResponse(c, response)
+}
+
+func (s *Server) addSSHKey(c *gin.Context) {
+	var req struct {
+		Name string `json:"name"`
+		Key  string `json:"key"`
+	}
+	if err := decode(c, &req); err != nil {
+		respondError(c, http.StatusBadRequest, errors.New("invalid request body"))
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if !validSSHPublicKey(req.Key) {
+		respondError(c, http.StatusBadRequest, errors.New("invalid SSH public key"))
+		return
+	}
+	if len(name) > 64 || strings.ContainsAny(name, "\r\n") {
+		respondError(c, http.StatusBadRequest, errors.New("invalid SSH key name"))
+		return
+	}
+	body, err := json.Marshal(map[string]string{"key": strings.TrimSpace(req.Key), "name": name})
+	if err != nil {
+		respondError(c, http.StatusBadRequest, errors.New("invalid SSH public key"))
+		return
+	}
+	tenantID, binding, ok := s.customerBinding(c)
+	if !ok {
+		return
+	}
+	response, err := s.DStack.Execute(c, tenantID, binding, dstack.Operation{
+		Method:  http.MethodPost,
+		Path:    "/api/users/public_keys/add",
+		Headers: jsonHeaders(),
+		Body:    body,
+	})
+	if err != nil {
+		respondProxyError(c, err)
+		return
+	}
+	writeProxyResponse(c, response)
+}
+
+func (s *Server) deleteSSHKey(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	if !uuidPattern.MatchString(id) {
+		respondError(c, http.StatusBadRequest, errors.New("invalid SSH key id"))
+		return
+	}
+	body, err := json.Marshal(map[string]any{"ids": []string{id}})
+	if err != nil {
+		respondError(c, http.StatusBadRequest, errors.New("invalid SSH key id"))
+		return
+	}
+	tenantID, binding, ok := s.customerBinding(c)
+	if !ok {
+		return
+	}
+	response, err := s.DStack.Execute(c, tenantID, binding, dstack.Operation{
+		Method:  http.MethodPost,
+		Path:    "/api/users/public_keys/delete",
+		Headers: jsonHeaders(),
+		Body:    body,
+	})
+	if err != nil {
+		respondProxyError(c, err)
+		return
+	}
+	writeProxyResponse(c, response)
+}
+
+func (s *Server) runSSH(c *gin.Context) {
+	name := strings.TrimSpace(c.Param("name"))
+	if name == "" || len(name) > 200 || strings.ContainsAny(name, "/\\") {
+		respondError(c, http.StatusBadRequest, errors.New("invalid run name"))
+		return
+	}
+	tenantID, binding, ok := s.customerBinding(c)
+	if !ok {
+		return
+	}
+	body, err := json.Marshal(map[string]string{"run_name": name})
+	if err != nil {
+		respondError(c, http.StatusBadRequest, errors.New("invalid run name"))
+		return
+	}
+	response, err := s.DStack.Execute(c, tenantID, binding, dstack.Operation{
+		Method:  http.MethodPost,
+		Path:    "/api/runs/get",
+		Headers: jsonHeaders(),
+		Body:    body,
+	})
+	if err != nil {
+		respondProxyError(c, err)
+		return
+	}
+	if response.Status != http.StatusOK {
+		writeProxyResponse(c, response)
+		return
+	}
+	connections, err := dstack.ProxiedSSHConnections(response.Body)
+	if err != nil {
+		respondError(c, http.StatusBadGateway, errors.New("invalid compute response"))
+		return
+	}
+	if len(connections) == 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "SSH is not available for this run", "run_name": name})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"run_name": name, "connections": connections})
+}
+
 func (s *Server) createPurchase(c *gin.Context) {
 	var req struct {
 		Package domain.PackageSize `json:"package_credits"`
@@ -467,23 +692,10 @@ func (s *Server) proxyDStack(c *gin.Context) {
 	op := dstack.Operation{Method: c.Request.Method, Path: path, Query: c.Request.URL.Query(), Body: body, Headers: headers, IdempotencyKey: c.GetHeader("Idempotency-Key")}
 	response, err := s.DStack.Execute(c, p.TenantID, binding.DStack, op)
 	if err != nil {
-		status := 403
-		if errors.Is(err, domain.ErrInsufficientCredits) || errors.Is(err, domain.ErrPriceUnverified) {
-			status = 402
-		}
-		if errors.Is(err, domain.ErrTenantUnavailable) {
-			status = 503
-		}
-		respondError(c, status, err)
+		respondProxyError(c, err)
 		return
 	}
-	for key, values := range response.Headers {
-		for _, value := range values {
-			c.Header(key, value)
-		}
-	}
-	c.Status(response.Status)
-	_, _ = c.Writer.Write(response.Body)
+	writeProxyResponse(c, response)
 }
 
 func (s *Server) providerTenants(c *gin.Context) {

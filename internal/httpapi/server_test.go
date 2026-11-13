@@ -86,6 +86,13 @@ func TestRouterHealthAndProtectedRoutes(t *testing.T) {
 	if customerProxy.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated /v1/api status = %d, want 401", customerProxy.Code)
 	}
+	for _, path := range []string{"/v1/ssh-keys", "/v1/runs/example/ssh"} {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated %s status = %d, want 401", path, recorder.Code)
+		}
+	}
 }
 
 func TestRequestLimiterDoesNotEvictAtExactThreshold(t *testing.T) {

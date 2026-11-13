@@ -148,6 +148,10 @@ func (p *Proxy) bindProviderBackends(raw []byte, path string) ([]byte, error) {
 	if spec == nil {
 		return nil, errors.New("plan is missing its specification")
 	}
+	// Customers never bring their own host key. dstack fills the run key
+	// from the tenant user's server-managed key, and interactive access
+	// goes through the SSH proxy.
+	delete(spec, "ssh_key_pub")
 	configuration, ok := spec["configuration"].(map[string]any)
 	if !ok {
 		return nil, errors.New("plan is missing its configuration")
@@ -512,10 +516,6 @@ func bindProject(raw []byte, path, project, projectID, username string) ([]byte,
 			}
 		}
 		object["within_projects"] = []string{projectID}
-	case path == "/api/users/public_keys/list" || path == "/api/users/public_keys/add" || path == "/api/users/public_keys/delete":
-		if err := set("username", username); err != nil {
-			return nil, err
-		}
 	case path == "/api/runs/list":
 		if err := set("project_name", project); err != nil {
 			return nil, err
@@ -615,5 +615,33 @@ func redactJSON(raw []byte) ([]byte, error) {
 			return node
 		}
 	}
-	return json.Marshal(clean(value))
+	return json.Marshal(scrubSSHAccess(clean(value)))
+}
+
+// scrubSSHAccess removes direct host addressing from dstack responses.
+// Interactive SSH must go through the managed proxy, so customers never
+// receive a host address, an SSH port, or an attach command for the host.
+func scrubSSHAccess(node any) any {
+	switch v := node.(type) {
+	case map[string]any:
+		delete(v, "job_provisioning_data")
+		if connection, ok := v["job_connection_info"].(map[string]any); ok {
+			delete(connection, "attached_ssh_command")
+			delete(connection, "attached_ide_url")
+		}
+		if _, isInstance := v["instance_type"]; isInstance {
+			delete(v, "hostname")
+		}
+		for key, child := range v {
+			v[key] = scrubSSHAccess(child)
+		}
+		return v
+	case []any:
+		for i, child := range v {
+			v[i] = scrubSSHAccess(child)
+		}
+		return v
+	default:
+		return node
+	}
 }
