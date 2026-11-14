@@ -99,6 +99,8 @@ services:
     depends_on:
       dstack:
         condition: service_healthy
+      caddy:
+        condition: service_healthy
       cert-init:
         condition: service_completed_successfully
     command:
