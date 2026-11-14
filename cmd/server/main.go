@@ -18,6 +18,7 @@ import (
 	"billing-backend/internal/ledger"
 	"billing-backend/internal/payments"
 	"billing-backend/internal/pricing"
+	"billing-backend/internal/providerdashboard"
 	"billing-backend/internal/store"
 	"billing-backend/internal/tenant"
 )
@@ -56,7 +57,8 @@ func main() {
 	go runProviderBackendSync(ctx, provisioner)
 	go runUsageReconciler(ctx, tenantService, reconciler)
 	go runPaymentReconciler(ctx, paymentService)
-	api := &httpapi.Server{Identity: identityService, Keys: keyService, Ledger: ledgerService, Meter: reconciler.Meter, Tenants: tenantService, Payments: paymentService, Pricing: priceService, DStack: proxy, PaymentServerKey: cfg.MidtransServerKey, AdminUsername: cfg.AdminUsername, AdminPassword: cfg.AdminPassword, TrustedProxies: cfg.TrustedProxyCIDRs}
+	dashboardService := &providerdashboard.Service{DB: db.Pool, Pricing: priceService}
+	api := &httpapi.Server{Identity: identityService, Keys: keyService, Ledger: ledgerService, Meter: reconciler.Meter, Tenants: tenantService, Payments: paymentService, Pricing: priceService, ProviderDashboard: dashboardService, DStack: proxy, PaymentServerKey: cfg.MidtransServerKey, AdminUsername: cfg.AdminUsername, AdminPassword: cfg.AdminPassword, TrustedProxies: cfg.TrustedProxyCIDRs}
 	server := &http.Server{Addr: cfg.ListenAddr, Handler: api.Router(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 60 * time.Second}
 	stopped := make(chan os.Signal, 1)
 	signal.Notify(stopped, syscall.SIGINT, syscall.SIGTERM)
