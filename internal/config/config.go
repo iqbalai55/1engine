@@ -12,6 +12,8 @@ type Config struct {
 	DatabaseURL          string
 	ListenAddr           string
 	SessionSecret        []byte
+	AdminUsername        string
+	AdminPassword        string
 	EncryptionKey        []byte
 	DStackURL            string
 	DStackAdminToken     string
@@ -34,6 +36,8 @@ func Load() (Config, error) {
 		DatabaseURL:          os.Getenv("DATABASE_URL"),
 		ListenAddr:           os.Getenv("LISTEN_ADDR"),
 		SessionSecret:        []byte(os.Getenv("SESSION_SECRET")),
+		AdminUsername:        os.Getenv("ADMIN_USERNAME"),
+		AdminPassword:        os.Getenv("ADMIN_PASSWORD"),
 		EncryptionKey:        []byte(os.Getenv("DSTACK_ENCRYPTION_KEY")),
 		DStackURL:            os.Getenv("DSTACK_URL"),
 		DStackAdminToken:     os.Getenv("DSTACK_ADMIN_TOKEN"),
@@ -102,6 +106,12 @@ func Load() (Config, error) {
 	}
 	if len(cfg.SessionSecret) < 32 {
 		return Config{}, errors.New("SESSION_SECRET must contain at least 32 bytes")
+	}
+	if (cfg.AdminUsername == "") != (cfg.AdminPassword == "") {
+		return Config{}, errors.New("ADMIN_USERNAME and ADMIN_PASSWORD must be set together")
+	}
+	if cfg.AdminPassword != "" && len(cfg.AdminPassword) < 12 {
+		return Config{}, errors.New("ADMIN_PASSWORD must contain at least 12 bytes")
 	}
 	if !strings.HasPrefix(cfg.PublicBaseURL, "https://") {
 		return Config{}, errors.New("PUBLIC_BASE_URL must use HTTPS")

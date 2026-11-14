@@ -370,3 +370,39 @@ func TestForwardedForIsHonoredFromTrustedProxy(t *testing.T) {
 		}
 	}
 }
+
+func TestProviderAuthAcceptsAdminBasicOrPortalSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engineFor := func(server *Server) *gin.Engine {
+		server.Limiter = newRequestLimiter()
+		engine := gin.New()
+		engine.GET("/provider/ping", server.providerAuth(), server.providerOnly(), func(c *gin.Context) {
+			c.Status(http.StatusNoContent)
+		})
+		return engine
+	}
+
+	configured := &Server{AdminUsername: "admin", AdminPassword: "test-admin-password", Identity: &identityStub{}}
+	cases := []struct {
+		name   string
+		server *Server
+		set    func(*http.Request)
+		want   int
+	}{
+		{"valid admin", configured, func(r *http.Request) { r.SetBasicAuth("admin", "test-admin-password") }, http.StatusNoContent},
+		{"wrong password", configured, func(r *http.Request) { r.SetBasicAuth("admin", "wrong") }, http.StatusUnauthorized},
+		{"no credentials", configured, func(*http.Request) {}, http.StatusUnauthorized},
+		{"admin disabled", &Server{Identity: &identityStub{}}, func(r *http.Request) { r.SetBasicAuth("admin", "test-admin-password") }, http.StatusUnauthorized},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/provider/ping", nil)
+			tc.set(request)
+			recorder := httptest.NewRecorder()
+			engineFor(tc.server).ServeHTTP(recorder, request)
+			if recorder.Code != tc.want {
+				t.Fatalf("status = %d, want %d", recorder.Code, tc.want)
+			}
+		})
+	}
+}

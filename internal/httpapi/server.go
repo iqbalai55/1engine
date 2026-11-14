@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -36,6 +38,8 @@ type Server struct {
 	Pricing          *pricing.Service
 	DStack           *dstack.Proxy
 	PaymentServerKey string
+	AdminUsername    string
+	AdminPassword    string
 	Limiter          *requestLimiter
 	TrustedProxies   []string
 }
@@ -125,7 +129,7 @@ func (s *Server) Router() *gin.Engine {
 	customer.DELETE("/ssh-keys/:id", s.deleteSSHKey)
 	customer.GET("/runs/:name/ssh", s.runSSH)
 	portal.POST("/credit-purchases", s.rateLimitBy("purchase", 10, time.Hour, tenantKey), s.createPurchase)
-	provider := v1.Group("/provider", s.authenticate(false), s.providerOnly())
+	provider := v1.Group("/provider", s.rateLimit("provider", 120, time.Minute), s.providerAuth(), s.providerOnly())
 	provider.GET("/tenants", s.providerTenants)
 	provider.PATCH("/tenants/:id/markup", s.setMarkup)
 	provider.GET("/ledger", s.providerLedger)
@@ -284,6 +288,42 @@ func (s *Server) authenticateCustomer() gin.HandlerFunc {
 		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), principalKey, p))
 		c.Next()
 	}
+}
+
+// providerAuth accepts either the shared admin credential or a signed-in
+// provider portal session. The admin branch lets the console run without a
+// Google account.
+func (s *Server) providerAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if username, password, ok := c.Request.BasicAuth(); ok {
+			if !s.adminCredentialsMatch(username, password) {
+				c.Header("WWW-Authenticate", `Basic realm="1Inference provider"`)
+				respondError(c, http.StatusUnauthorized, errors.New("invalid admin credentials"))
+				c.Abort()
+				return
+			}
+			p := principal{UserID: username, Provider: true, Kind: "admin"}
+			c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), principalKey, p))
+			c.Next()
+			return
+		}
+		s.authenticate(false)(c)
+	}
+}
+
+func (s *Server) adminCredentialsMatch(username, password string) bool {
+	if s.AdminUsername == "" || s.AdminPassword == "" {
+		return false
+	}
+	usernameMatches := constantTimeEqual(username, s.AdminUsername)
+	passwordMatches := constantTimeEqual(password, s.AdminPassword)
+	return usernameMatches && passwordMatches
+}
+
+func constantTimeEqual(a, b string) bool {
+	left := sha256.Sum256([]byte(a))
+	right := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(left[:], right[:]) == 1
 }
 
 func (s *Server) providerOnly() gin.HandlerFunc {
