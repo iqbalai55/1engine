@@ -371,3 +371,92 @@ func TestProxyResponseRedactsCredentials(t *testing.T) {
 		t.Fatalf("credential leaked in response %s", got)
 	}
 }
+
+func TestRunPlansStripCustomerSuppliedSSHKey(t *testing.T) {
+	backends, err := ParseProviderBackends([]byte("backends:\n  - type: aws\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := NewProxy("https://dstack.invalid", nil, nil, nil)
+	proxy.Backends = backends
+	for _, test := range []struct {
+		path string
+		body string
+	}{
+		{"/api/project/acme/runs/apply", `{"plan":{"run_spec":{"ssh_key_pub":"ssh-ed25519 AAAA customer","configuration":{"type":"task"}}},"force":false}`},
+		{"/api/project/acme/runs/get_plan", `{"run_spec":{"ssh_key_pub":"ssh-ed25519 AAAA customer","configuration":{"type":"task"}}}`},
+	} {
+		got, err := proxy.bindProviderBackends([]byte(test.body), test.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(got), "ssh_key_pub") {
+			t.Fatalf("%s kept the customer SSH key: %s", test.path, got)
+		}
+	}
+}
+
+func TestProxyScrubsDirectHostAccessFromResponses(t *testing.T) {
+	raw := []byte(`{
+		"jobs":[{
+			"id":"job-1",
+			"status":"running",
+			"job_connection_info":{
+				"attached_ssh_command":["ssh","host"],
+				"attached_ide_url":"vscode://ssh-remote+host/path",
+				"proxied_ssh_command":["ssh","-p","2222","job-1@ssh.example.com"],
+				"sshproxy_hostname":"ssh.example.com",
+				"sshproxy_port":2222,
+				"sshproxy_upstream_id":"job-1"
+			},
+			"job_submissions":[{"job_provisioning_data":{"hostname":"10.0.0.5","ssh_port":22}}]
+		}],
+		"instance_type":{"name":"A100"},
+		"hostname":"10.0.0.9"
+	}`)
+	got, err := redactJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(got)
+	for _, forbidden := range []string{"job_provisioning_data", "attached_ssh_command", "attached_ide_url", "10.0.0.5", "10.0.0.9"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("response kept direct host access %q: %s", forbidden, body)
+		}
+	}
+	for _, wanted := range []string{"proxied_ssh_command", "sshproxy_hostname"} {
+		if !strings.Contains(body, wanted) {
+			t.Errorf("response dropped the proxied connection %q: %s", wanted, body)
+		}
+	}
+}
+
+func TestPublicKeyBodiesDoNotCarryUsername(t *testing.T) {
+	got, err := bindProject([]byte(`{"key":"ssh-ed25519 AAAA","name":"laptop"}`), "/api/users/public_keys/add", "tenant-project", "tenant-project-id", "tenant-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "username") {
+		t.Fatalf("public key body carried a username the server rejects: %s", got)
+	}
+}
+
+func TestProxiedSSHConnections(t *testing.T) {
+	raw := []byte(`{"jobs":[
+		{"id":"job-1","job_connection_info":{"proxied_ssh_command":["ssh","-p","2222","job-1@ssh.example.com"],"sshproxy_hostname":"ssh.example.com","sshproxy_port":2222,"sshproxy_upstream_id":"job-1"}},
+		{"id":"job-2","job_connection_info":{"proxied_ssh_command":null,"sshproxy_hostname":null,"sshproxy_port":null,"sshproxy_upstream_id":null}}
+	]}`)
+	connections, err := ProxiedSSHConnections(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(connections) != 1 {
+		t.Fatalf("connections = %+v", connections)
+	}
+	if connections[0].Host != "ssh.example.com" || connections[0].Port != 2222 || connections[0].Username != "job-1" {
+		t.Fatalf("connection = %+v", connections[0])
+	}
+	if connections[0].CommandLine != "ssh -p 2222 job-1@ssh.example.com" {
+		t.Fatalf("command line = %q", connections[0].CommandLine)
+	}
+}

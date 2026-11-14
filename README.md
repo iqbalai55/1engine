@@ -64,6 +64,8 @@ The dstack observation worker records instance runtime intervals and charges eac
 - `GET /v1/me`, `/v1/me/credits`, `/v1/me/usage`, and `/v1/me/purchases` read the signed-in tenant's data.
 - `POST /v1/offers` lists rentable GPUs with their hourly price. It asks dstack for offers only, so it reserves nothing and needs no fleet.
 - `POST /v1/api-keys`, `POST /v1/api-keys/{id}/rotate`, and `DELETE /v1/api-keys/{id}` manage customer keys.
+- `GET /v1/ssh-keys`, `POST /v1/ssh-keys`, and `DELETE /v1/ssh-keys/{id}` register and revoke the public keys used for run SSH.
+- `GET /v1/runs/{name}/ssh` returns the proxied SSH command for a running run. Customers reach their own container, never the GPU host.
 - `POST /v1/credit-purchases` creates a fixed-package Snap checkout. Credits are granted only after a verified settlement.
 - `/v1/api/*` proxies allowlisted customer compute operations. Global and admin operations remain blocked.
 - `/v1/provider/*` requires the provider account bootstrapped by the CLI.
