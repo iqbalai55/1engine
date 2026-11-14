@@ -242,6 +242,10 @@ Requests under `/v1/api/` are checked against an allowlist. Global and admin
 operations are blocked. Fleet and run plans are restricted to your configured providers. A plan
 for a provider you did not configure is rejected.
 
+The allowlist accepts a portal sign-in session as well as an API key. The portal dashboard sends
+the session cookie value as the bearer token, so runs, fleets, and instances load there without a
+separate key. Automation still uses a customer API key.
+
 Starting compute (`runs/apply`, `fleets/apply`) also needs an `Idempotency-Key` header, and it
 needs credits. Without a verified price, the backend returns HTTP 402.
 
