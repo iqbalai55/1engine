@@ -132,7 +132,7 @@ func (s *Server) Router() *gin.Engine {
 	provider.GET("/price", s.getPrice)
 	provider.PUT("/price", s.setPrice)
 	v1.POST("/payments/midtrans/notification", s.notification)
-	proxyAPI := v1.Group("/api", s.authenticate(true), s.rateLimitBy("proxy", 300, time.Minute, tenantKey))
+	proxyAPI := v1.Group("/api", s.authenticateCustomer(), s.rateLimitBy("proxy", 300, time.Minute, tenantKey))
 	proxyAPI.Any("/*path", s.proxyDStack)
 	return r
 }
@@ -251,7 +251,7 @@ func (s *Server) authenticate(apiOnly bool) gin.HandlerFunc {
 }
 
 // authenticateCustomer accepts either a portal session or a customer API key.
-// SSH self-service is available from the portal and from automation alike.
+// The signed-in dashboard and automation both reach compute through it.
 func (s *Server) authenticateCustomer() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		auth := c.GetHeader("Authorization")
