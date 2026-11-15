@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"math"
@@ -24,24 +25,26 @@ import (
 	"billing-backend/internal/ledger"
 	"billing-backend/internal/payments"
 	"billing-backend/internal/pricing"
+	"billing-backend/internal/providerdashboard"
 	"billing-backend/internal/tenant"
 	"github.com/gin-gonic/gin"
 )
 
 type Server struct {
-	Identity         identityService
-	Keys             *apikey.Service
-	Ledger           *ledger.Service
-	Meter            *compute.Meter
-	Tenants          *tenant.Service
-	Payments         *payments.Service
-	Pricing          *pricing.Service
-	DStack           *dstack.Proxy
-	PaymentServerKey string
-	AdminUsername    string
-	AdminPassword    string
-	Limiter          *requestLimiter
-	TrustedProxies   []string
+	Identity          identityService
+	Keys              *apikey.Service
+	Ledger            *ledger.Service
+	Meter             *compute.Meter
+	Tenants           *tenant.Service
+	Payments          *payments.Service
+	Pricing           *pricing.Service
+	ProviderDashboard *providerdashboard.Service
+	DStack            *dstack.Proxy
+	PaymentServerKey  string
+	AdminUsername     string
+	AdminPassword     string
+	Limiter           *requestLimiter
+	TrustedProxies    []string
 }
 
 type identityService interface {
@@ -131,6 +134,9 @@ func (s *Server) Router() *gin.Engine {
 	portal.POST("/credit-purchases", s.rateLimitBy("purchase", 10, time.Hour, tenantKey), s.createPurchase)
 	provider := v1.Group("/provider", s.rateLimit("provider", 120, time.Minute), s.providerAuth(), s.providerOnly())
 	provider.GET("/tenants", s.providerTenants)
+	provider.GET("/dashboard", s.providerDashboardSnapshot)
+	provider.GET("/customers", s.providerDashboardCustomers)
+	provider.GET("/billing", s.providerDashboardBilling)
 	provider.PATCH("/tenants/:id/markup", s.setMarkup)
 	provider.GET("/ledger", s.providerLedger)
 	provider.GET("/price", s.getPrice)
@@ -746,6 +752,81 @@ func (s *Server) providerTenants(c *gin.Context) {
 	}
 	c.JSON(200, tenants)
 }
+
+func (s *Server) providerDashboardSnapshot(c *gin.Context) {
+	limit, err := dashboardLimit(c)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
+	if s.ProviderDashboard == nil {
+		respondError(c, http.StatusServiceUnavailable, errors.New("provider dashboard is unavailable"))
+		return
+	}
+	result, err := s.ProviderDashboard.Snapshot(c, limit)
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, errors.New("could not load provider dashboard"))
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) providerDashboardCustomers(c *gin.Context) {
+	limit, err := dashboardLimit(c)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
+	if s.ProviderDashboard == nil {
+		respondError(c, http.StatusServiceUnavailable, errors.New("provider dashboard is unavailable"))
+		return
+	}
+	result, err := s.ProviderDashboard.Customers(c, limit, c.Query("cursor"), c.Query("q"))
+	if errors.Is(err, providerdashboard.ErrInvalidCursor) || errors.Is(err, providerdashboard.ErrInvalidQuery) {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, errors.New("could not load provider customers"))
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) providerDashboardBilling(c *gin.Context) {
+	limit, err := dashboardLimit(c)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
+	if s.ProviderDashboard == nil {
+		respondError(c, http.StatusServiceUnavailable, errors.New("provider dashboard is unavailable"))
+		return
+	}
+	result, err := s.ProviderDashboard.Billing(c, limit, c.Query("cursor"))
+	if errors.Is(err, providerdashboard.ErrInvalidCursor) || errors.Is(err, providerdashboard.ErrInvalidQuery) {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, errors.New("could not load provider billing"))
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func dashboardLimit(c *gin.Context) (int, error) {
+	value := c.Query("limit")
+	if value == "" {
+		return 0, nil
+	}
+	limit, err := strconv.Atoi(value)
+	if err != nil || limit < 1 || limit > 50 {
+		return 0, fmt.Errorf("%w: limit must be between 1 and 50", providerdashboard.ErrInvalidQuery)
+	}
+	return limit, nil
+}
+
 func (s *Server) setMarkup(c *gin.Context) {
 	var req struct {
 		MarkupBPS domain.MarkupBPS `json:"markup_bps"`

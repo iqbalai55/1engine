@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"billing-backend/internal/identity"
+	"billing-backend/internal/providerdashboard"
 	"github.com/gin-gonic/gin"
 )
 
@@ -404,5 +405,49 @@ func TestProviderAuthAcceptsAdminBasicOrPortalSession(t *testing.T) {
 				t.Fatalf("status = %d, want %d", recorder.Code, tc.want)
 			}
 		})
+	}
+}
+
+func TestProviderDashboardRoutesRequireProviderAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := (&Server{AdminUsername: "admin", AdminPassword: "test-admin-password"}).Router()
+	for _, path := range []string{"/v1/provider/dashboard", "/v1/provider/customers", "/v1/provider/billing"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.SetBasicAuth("admin", "test-admin-password")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s with valid admin auth status = %d, want 503 while service is absent", path, recorder.Code)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/provider/customers?limit=0", nil)
+	request.SetBasicAuth("admin", "test-admin-password")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid limit status = %d, want 400", recorder.Code)
+	}
+}
+
+func TestProviderDashboardHandlersRejectInvalidServiceInputs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &providerdashboard.Service{}
+	server := &Server{ProviderDashboard: service, AdminUsername: "admin", AdminPassword: "test-admin-password"}
+	for _, tc := range []struct {
+		path string
+	}{
+		{"/v1/provider/customers?limit=51"},
+		{"/v1/provider/customers?q=" + strings.Repeat("x", 201)},
+		{"/v1/provider/customers?cursor=bad"},
+		{"/v1/provider/billing?cursor=bad"},
+	} {
+		router := server.Router()
+		request := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		request.SetBasicAuth("admin", "test-admin-password")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Errorf("%s status = %d, want 400: %s", tc.path, recorder.Code, recorder.Body.String())
+		}
 	}
 }
