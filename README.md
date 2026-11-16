@@ -54,6 +54,18 @@ go install github.com/avito-tech/go-mutesting/cmd/go-mutesting@latest
 TEST_DATABASE_URL='postgres://billing_test:secret@localhost:5432/billing_test?sslmode=verify-full' ./scripts/mutation-test.sh
 ```
 
+## Static analysis
+
+SonarQube analyzes every push to `main` through `.github/workflows/sonar.yml` and fails the run when the quality gate fails. The server is `https://code.bdforms.id`; the workflow reads its token from the `SONAR_TOKEN` repository secret. Project settings live in `sonar-project.properties`.
+
+Run the same analysis locally. The coverage report is written to `coverage.out`, which the scanner reads per `sonar.go.coverage.reportPaths`.
+
+```sh
+go test -covermode=atomic -coverprofile=coverage.out ./...
+docker run --rm -e SONAR_TOKEN -e SONAR_HOST_URL=https://code.bdforms.id \
+  -v "$PWD:/usr/src" sonarsource/sonar-scanner-cli
+```
+
 ## Billing limitation
 
 The dstack observation worker records instance runtime intervals and charges each interval at the instance's reported price. The dstack metrics documentation defines `dstack_instance_price_dollars_per_hour` as the instance price in USD per hour, which is one price for the whole instance regardless of GPU count. The published instance schema does not state this. Keep customer charges blocked until one live instance confirms that its reported price matches the provider's console price for the same instance type. Then the provider marks the price verified with `PUT /v1/provider/price`, and charges start. Reservations at admission still use the verified rate from that endpoint.
