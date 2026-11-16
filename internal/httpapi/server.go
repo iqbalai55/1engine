@@ -101,6 +101,11 @@ type contextKey string
 
 const principalKey contextKey = "principal"
 
+const (
+	bearerPrefix      = "Bearer "
+	headerContentType = "Content-Type"
+)
+
 func (s *Server) Router() *gin.Engine {
 	if s.Limiter == nil {
 		s.Limiter = newRequestLimiter()
@@ -204,7 +209,7 @@ func (s *Server) googleCallback(c *gin.Context) {
 }
 
 func (s *Server) logout(c *gin.Context) {
-	auth := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
+	auth := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), bearerPrefix))
 	if auth == "" {
 		c.Status(http.StatusNoContent)
 		return
@@ -218,12 +223,12 @@ func (s *Server) logout(c *gin.Context) {
 func (s *Server) authenticate(apiOnly bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		auth := c.GetHeader("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
+		if !strings.HasPrefix(auth, bearerPrefix) {
 			respondError(c, http.StatusUnauthorized, errors.New("authentication required"))
 			c.Abort()
 			return
 		}
-		token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		token := strings.TrimSpace(strings.TrimPrefix(auth, bearerPrefix))
 		var p principal
 		if apiOnly {
 			tenantID, err := s.Keys.Authenticate(c, token)
@@ -265,12 +270,12 @@ func (s *Server) authenticate(apiOnly bool) gin.HandlerFunc {
 func (s *Server) authenticateCustomer() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		auth := c.GetHeader("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
+		if !strings.HasPrefix(auth, bearerPrefix) {
 			respondError(c, http.StatusUnauthorized, errors.New("authentication required"))
 			c.Abort()
 			return
 		}
-		token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		token := strings.TrimSpace(strings.TrimPrefix(auth, bearerPrefix))
 		if tenantID, err := s.Keys.Authenticate(c, token); err == nil {
 			p := principal{TenantID: domain.TenantID(tenantID), Kind: "api"}
 			c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), principalKey, p))
@@ -490,7 +495,7 @@ func (s *Server) listKeys(c *gin.Context) {
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 func jsonHeaders() http.Header {
-	return http.Header{"Content-Type": []string{"application/json"}}
+	return http.Header{headerContentType: []string{"application/json"}}
 }
 
 func validSSHPublicKey(key string) bool {
@@ -734,7 +739,7 @@ func (s *Server) proxyDStack(c *gin.Context) {
 		path = "/api" + path
 	}
 	headers := make(http.Header)
-	headers.Set("Content-Type", c.GetHeader("Content-Type"))
+	headers.Set(headerContentType, c.GetHeader(headerContentType))
 	op := dstack.Operation{Method: c.Request.Method, Path: path, Query: c.Request.URL.Query(), Body: body, Headers: headers, IdempotencyKey: c.GetHeader("Idempotency-Key")}
 	response, err := s.DStack.Execute(c, p.TenantID, binding.DStack, op)
 	if err != nil {
