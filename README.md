@@ -56,7 +56,7 @@ TEST_DATABASE_URL='postgres://billing_test:secret@localhost:5432/billing_test?ss
 
 ## Static analysis
 
-SonarQube analyzes every push to `main` through `.github/workflows/sonar.yml` and fails the run when the quality gate fails. The server is `https://code.bdforms.id`; the workflow reads its token from the `SONAR_TOKEN` repository secret. Project settings live in `sonar-project.properties`.
+SonarQube analyzes every push to `main` through `.github/workflows/sonar.yml` and fails the run when the quality gate fails. Pull requests run the same vet and test steps but are not analyzed, because SonarQube Community analyzes a single branch. The server is `https://code.bdforms.id`; the workflow reads its token from the `SONAR_TOKEN` repository secret. Project settings live in `sonar-project.properties`.
 
 Run the same analysis locally. The coverage report is written to `coverage.out`, which the scanner reads per `sonar.go.coverage.reportPaths`.
 
