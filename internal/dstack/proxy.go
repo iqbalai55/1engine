@@ -26,6 +26,9 @@ const (
 	OperationStart    OperationKind = "compute-start"
 	OperationStop     OperationKind = "compute-stop"
 	OperationMutation OperationKind = "tenant-mutation"
+
+	headerContentType = "Content-Type"
+	projectsPath      = "/api/projects/"
 )
 
 type RoutePolicy struct {
@@ -312,7 +315,7 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 		return SafeResponse{}, errors.New("compute start requires an Idempotency-Key")
 	}
 	if _, isPlan := backendPlanForPath(op.Path); isPlan {
-		if len(op.Body) == 0 || !strings.Contains(strings.ToLower(op.Headers.Get("Content-Type")), "json") {
+		if len(op.Body) == 0 || !strings.Contains(strings.ToLower(op.Headers.Get(headerContentType)), "json") {
 			return SafeResponse{}, errors.New("fleet and run plans require a JSON body")
 		}
 		if !json.Valid(op.Body) {
@@ -335,7 +338,7 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 		return SafeResponse{}, domain.ErrTenantUnavailable
 	}
 	if len(op.Body) > 0 {
-		if strings.Contains(strings.ToLower(op.Headers.Get("Content-Type")), "json") {
+		if strings.Contains(strings.ToLower(op.Headers.Get(headerContentType)), "json") {
 			op.Body, err = bindProject(op.Body, op.Path, string(binding.Project), binding.ProjectID, binding.Username)
 		} else {
 			return SafeResponse{}, errors.New("request bodies must be JSON")
@@ -347,7 +350,7 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 	if len(op.Body) == 0 && op.Method == http.MethodPost {
 		return SafeResponse{}, errors.New("request body is required")
 	}
-	if len(op.Body) > 0 && !strings.Contains(strings.ToLower(op.Headers.Get("Content-Type")), "json") {
+	if len(op.Body) > 0 && !strings.Contains(strings.ToLower(op.Headers.Get(headerContentType)), "json") {
 		return SafeResponse{}, errors.New("request bodies must be JSON")
 	}
 	if len(op.Query) > 0 {
@@ -372,7 +375,7 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 			return SafeResponse{}, reserveErr
 		}
 		if reservation.Replayed {
-			return SafeResponse{Status: reservation.ResponseStatus, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: reservation.ResponseBody}, nil
+			return SafeResponse{Status: reservation.ResponseStatus, Headers: http.Header{headerContentType: []string{"application/json"}}, Body: reservation.ResponseBody}, nil
 		}
 	}
 	endpoint, err := url.Parse(strings.TrimRight(p.BaseURL, "/") + path)
@@ -389,8 +392,8 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 	}
 	request.Header.Set("Authorization", "Bearer "+credential)
 	request.Header.Set("Accept", "application/json")
-	if ct := op.Headers.Get("Content-Type"); ct != "" {
-		request.Header.Set("Content-Type", ct)
+	if ct := op.Headers.Get(headerContentType); ct != "" {
+		request.Header.Set(headerContentType, ct)
 	}
 	client := p.HTTP
 	if client == nil {
@@ -408,7 +411,7 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 	if err != nil {
 		return SafeResponse{}, err
 	}
-	if strings.Contains(response.Header.Get("Content-Type"), "json") {
+	if strings.Contains(response.Header.Get(headerContentType), "json") {
 		body, err = redactJSON(body)
 		if err != nil {
 			return SafeResponse{}, fmt.Errorf("dstack returned invalid JSON")
@@ -432,7 +435,7 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 		body = nil
 	}
 	headers := make(http.Header)
-	for _, name := range []string{"Content-Type", "ETag", "Last-Modified", "Cache-Control"} {
+	for _, name := range []string{headerContentType, "ETag", "Last-Modified", "Cache-Control"} {
 		if value := response.Header.Get(name); value != "" {
 			headers.Set(name, value)
 		}
@@ -441,7 +444,7 @@ func (p *Proxy) Execute(ctx context.Context, tenant domain.TenantID, binding dom
 }
 
 func projectPath(path string) bool {
-	return strings.HasPrefix(path, "/api/project/") || strings.HasPrefix(path, "/api/projects/") || strings.HasPrefix(path, "/proxy/")
+	return strings.HasPrefix(path, "/api/project/") || strings.HasPrefix(path, projectsPath) || strings.HasPrefix(path, "/proxy/")
 }
 
 // projectAliases are customer routes that need a project on the server side but should
@@ -480,7 +483,7 @@ func bindProject(raw []byte, path, project, projectID, username string) ([]byte,
 		return nil
 	}
 	switch {
-	case strings.HasPrefix(path, "/api/projects/"):
+	case strings.HasPrefix(path, projectsPath):
 		if len(object) != 0 {
 			return nil, errors.New("project detail request must be empty")
 		}

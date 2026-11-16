@@ -279,7 +279,7 @@ func (p *Provisioner) Provision(ctx context.Context, id domain.TenantID) error {
 		return p.failed(ctx, id, err)
 	}
 	if errors.Is(err, errResourceExists) {
-		if verifyErr := p.Admin.post(ctx, "/api/projects/"+url.PathEscape(string(t.DStack.Project))+"/get", map[string]any{}, &createdProject); verifyErr != nil || createdProject.ProjectName != string(t.DStack.Project) {
+		if verifyErr := p.Admin.post(ctx, projectsPath+url.PathEscape(string(t.DStack.Project))+"/get", map[string]any{}, &createdProject); verifyErr != nil || createdProject.ProjectName != string(t.DStack.Project) {
 			return p.failed(ctx, id, errors.New("existing dstack project does not match tenant identity"))
 		}
 	}
@@ -288,13 +288,13 @@ func (p *Provisioner) Provision(ctx context.Context, id domain.TenantID) error {
 			return p.failed(ctx, id, err)
 		}
 	}
-	memberPath := "/api/projects/" + url.PathEscape(string(t.DStack.Project)) + "/add_members"
+	memberPath := projectsPath + url.PathEscape(string(t.DStack.Project)) + "/add_members"
 	if err = p.Admin.post(ctx, memberPath, addMembersRequest{Members: []memberSetting{{Username: t.DStack.Username, ProjectRole: "admin"}}}, nil); err != nil && !errors.Is(err, errResourceExists) {
 		return p.failed(ctx, id, err)
 	}
 	if errors.Is(err, errResourceExists) {
 		var existing projectResponse
-		if verifyErr := p.Admin.post(ctx, "/api/projects/"+url.PathEscape(string(t.DStack.Project))+"/get", map[string]any{}, &existing); verifyErr != nil || !hasAdminMember(existing, t.DStack.Username) {
+		if verifyErr := p.Admin.post(ctx, projectsPath+url.PathEscape(string(t.DStack.Project))+"/get", map[string]any{}, &existing); verifyErr != nil || !hasAdminMember(existing, t.DStack.Username) {
 			return p.failed(ctx, id, errors.New("existing dstack project membership does not match tenant identity"))
 		}
 	}

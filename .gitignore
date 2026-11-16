@@ -2,6 +2,8 @@
 .env.*
 !.env.example
 coverage/
+coverage.out
+.scannerwork/
 tmp/
 *.test
 provider-backends.yml
